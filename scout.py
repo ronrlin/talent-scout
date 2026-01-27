@@ -8,7 +8,13 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from config_loader import load_config
+from config_loader import (
+    load_config,
+    get_locations,
+    get_location_slug,
+    get_all_location_slugs,
+    is_remote_enabled,
+)
 from agents import CompanyScoutAgent, CompanyResearcherAgent, LearningAgent, JobResearcherAgent
 
 console = Console()
@@ -20,7 +26,7 @@ HELP_TEXT = """
 Talent Scout - AI-powered job search automation
 
 WORKFLOW:
-  1. Scout companies    → scout companies --location boca
+  1. Scout companies    → scout companies --location "Palo Alto, CA"
   2. Research & import  → scout research "Company" or scout research <url>
   3. Review jobs        → scout jobs
   4. Learn preferences  → scout learn (after importing/deleting jobs)
@@ -29,7 +35,7 @@ WORKFLOW:
   7. Generate cover     → scout cover-letter <job_id>
 
 DISCOVERY:
-  companies     Scout target companies by location (boca/palo/remote)
+  companies     Scout target companies by location (from config.json)
   research      Research a company OR import a job from URL
   import-jobs   Import jobs from markdown files in import-jobs/
   jobs          List all discovered job opportunities
@@ -47,7 +53,7 @@ APPLICATION:
   cover-letter-gen Regenerate PDF from edited cover letter markdown
 
 EXAMPLES:
-  scout companies --location boca --count 10
+  scout companies --location "Palo Alto, CA" --count 10
   scout research "Google"
   scout research https://jobs.example.com/posting/12345
   scout jobs --company ModMed
@@ -69,9 +75,9 @@ def cli(ctx):
 @cli.command()
 @click.option(
     "--location",
-    type=click.Choice(["boca", "palo", "remote", "all"]),
+    type=str,
     default="all",
-    help="Target location to scout companies for.",
+    help="Target location to scout (e.g., 'Palo Alto, CA' or 'remote' or 'all').",
 )
 @click.option(
     "--count",
@@ -87,11 +93,39 @@ def companies(ctx, location: str, count: int | None):
     if count is None:
         count = config["preferences"]["companies_per_location"]
 
-    locations = [location] if location != "all" else ["boca", "palo", "remote"]
+    # Build list of locations to scout
+    configured_locations = get_locations(config)
+    include_remote = is_remote_enabled(config)
+
+    if location.lower() == "all":
+        locations_to_scout = list(configured_locations)
+        if include_remote:
+            locations_to_scout.append("remote")
+    elif location.lower() == "remote":
+        if include_remote:
+            locations_to_scout = ["remote"]
+        else:
+            console.print("[yellow]Remote is not enabled in config.json. Set 'include_remote: true' to enable.[/yellow]")
+            return
+    else:
+        # Check if it's a configured location
+        if location in configured_locations:
+            locations_to_scout = [location]
+        else:
+            # Try to find a partial match
+            matched = [loc for loc in configured_locations if location.lower() in loc.lower()]
+            if matched:
+                locations_to_scout = matched
+            else:
+                console.print(f"[yellow]Location '{location}' not found in config.[/yellow]")
+                console.print(f"[dim]Configured locations: {', '.join(configured_locations)}[/dim]")
+                if include_remote:
+                    console.print("[dim]Remote is also enabled.[/dim]")
+                return
 
     agent = CompanyScoutAgent(config)
 
-    for loc in locations:
+    for loc in locations_to_scout:
         console.print(f"\n[bold blue]Scouting companies for: {loc}[/bold blue]")
         results = agent.scout(location=loc, count=count)
         console.print(f"[green]Found {len(results)} companies for {loc}[/green]")
@@ -193,24 +227,44 @@ def import_jobs(ctx):
 @cli.command()
 @click.option(
     "--location",
-    type=click.Choice(["boca", "palo", "remote", "all"]),
+    type=str,
     default="all",
-    help="Filter jobs by location.",
+    help="Filter jobs by location (e.g., 'Palo Alto, CA' or 'remote' or 'all').",
 )
 @click.option("--company", help="Filter jobs by company name.")
 @click.pass_context
 def jobs(ctx, location: str, company: str | None):
     """List discovered job opportunities."""
-    locations = [location] if location != "all" else ["boca", "palo", "remote"]
+    config = ctx.obj["config"]
+    all_location_slugs = get_all_location_slugs(config)
+
+    # Determine which location slugs to load
+    if location.lower() == "all":
+        slugs_to_load = all_location_slugs
+    elif location.lower() == "remote":
+        slugs_to_load = ["remote"]
+    else:
+        # Try to match the location to a slug
+        slug = get_location_slug(location)
+        if slug in all_location_slugs:
+            slugs_to_load = [slug]
+        else:
+            # Try partial match on configured locations
+            configured_locations = get_locations(config)
+            matched = [loc for loc in configured_locations if location.lower() in loc.lower()]
+            if matched:
+                slugs_to_load = [get_location_slug(loc) for loc in matched]
+            else:
+                slugs_to_load = all_location_slugs  # Fall back to all
 
     all_jobs = []
-    for loc in locations:
-        jobs_file = DATA_DIR / f"jobs-{loc}.json"
+    for slug in slugs_to_load:
+        jobs_file = DATA_DIR / f"jobs-{slug}.json"
         if jobs_file.exists():
             with open(jobs_file) as f:
                 data = json.load(f)
                 for job in data.get("jobs", []):
-                    job["_location_file"] = loc
+                    job["_location_file"] = slug
                     all_jobs.append(job)
 
     # Filter by company if specified
@@ -277,7 +331,7 @@ def delete(ctx, job_id: str, reason: str | None):
     agent = LearningAgent(config)
 
     # Find and remove the job
-    job, location = _find_and_remove_job(job_id)
+    job, location = _find_and_remove_job(job_id, config)
 
     if not job:
         console.print(f"[red]Job not found: {job_id}[/red]")
@@ -291,10 +345,12 @@ def delete(ctx, job_id: str, reason: str | None):
     console.print(f"[dim]This feedback will improve future targeting. Run 'scout learn' to update.[/dim]")
 
 
-def _find_and_remove_job(job_id: str) -> tuple[dict | None, str | None]:
+def _find_and_remove_job(job_id: str, config: dict) -> tuple[dict | None, str | None]:
     """Find a job by ID and remove it from its location file."""
-    for location in ["boca", "palo", "remote"]:
-        jobs_file = DATA_DIR / f"jobs-{location}.json"
+    all_slugs = get_all_location_slugs(config)
+
+    for slug in all_slugs:
+        jobs_file = DATA_DIR / f"jobs-{slug}.json"
         if not jobs_file.exists():
             continue
 
@@ -312,7 +368,7 @@ def _find_and_remove_job(job_id: str) -> tuple[dict | None, str | None]:
                 with open(jobs_file, "w") as f:
                     json.dump(data, f, indent=2)
 
-                return removed_job, location
+                return removed_job, slug
 
     return None, None
 

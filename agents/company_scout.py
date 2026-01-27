@@ -8,15 +8,9 @@ import anthropic
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from config_loader import get_anthropic_api_key
+from config_loader import get_anthropic_api_key, get_location_slug, get_location_description
 
 console = Console()
-
-LOCATION_DESCRIPTIONS = {
-    "boca": "Boca Raton, Florida or South Florida (Miami, Fort Lauderdale, Palm Beach area)",
-    "palo": "Palo Alto, California or the San Francisco Bay Area / Silicon Valley",
-    "remote": "remote-friendly companies that allow fully remote work",
-}
 
 SCOUT_SYSTEM_PROMPT = """You are a company research assistant helping with a job search. Your task is to identify and evaluate technology companies that would be good targets for a job search.
 
@@ -190,7 +184,7 @@ class CompanyScoutAgent:
         self, location: str, seed_companies: list[str], count: int
     ) -> str:
         """Build the prompt for Claude."""
-        location_desc = LOCATION_DESCRIPTIONS.get(location, location)
+        location_desc = get_location_description(location)
 
         seed_section = ""
         if seed_companies:
@@ -202,21 +196,32 @@ Here are some seed companies I'm interested in. Include any that have presence i
 Expand on this list with additional companies that match my criteria.
 """
 
+        # Get target roles from config
+        target_roles = self.config.get("preferences", {}).get("target_roles", [
+            "Engineering Manager",
+            "Software Manager",
+            "Technical Product Manager",
+            "Director of Analytics Engineering"
+        ])
+        roles_text = "\n".join(f"- {role}" for role in target_roles)
+
+        # Get company preferences
+        min_size = self.config.get("preferences", {}).get("min_company_size", 100)
+        prefer_public = self.config.get("preferences", {}).get("prefer_public_companies", True)
+        public_pref = "Prefer public companies or well-funded late-stage startups" if prefer_public else "Consider both public and private companies"
+
         return f"""Find {count} technology companies that have offices or presence in {location_desc}.
 
 {seed_section}
 
 Target roles I'm looking for:
-- Engineering Manager
-- Software Manager
-- Technical Product Manager
-- Director of Analytics Engineering
+{roles_text}
 
 Preferences:
-- Prefer public companies or well-funded late-stage startups
+- {public_pref}
 - Software should be a revenue driver for the company
 - Strong engineering culture is important
-- Minimum ~100 employees
+- Minimum ~{min_size} employees
 
 Return exactly {count} companies as JSON. Prioritize quality and fit over quantity."""
 
@@ -239,11 +244,13 @@ Return exactly {count} companies as JSON. Prioritize quality and fit over quanti
 
     def _save_results(self, location: str, companies: list[dict]) -> None:
         """Save results to JSON file."""
-        output_path = self.data_dir / f"companies-{location}.json"
+        slug = get_location_slug(location)
+        output_path = self.data_dir / f"companies-{slug}.json"
 
         data = {
             "location": location,
-            "location_description": LOCATION_DESCRIPTIONS.get(location, location),
+            "location_slug": slug,
+            "location_description": get_location_description(location),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "count": len(companies),
             "companies": companies,

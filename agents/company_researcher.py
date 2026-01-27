@@ -12,7 +12,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from config_loader import get_anthropic_api_key
+from config_loader import (
+    get_anthropic_api_key,
+    get_locations,
+    get_location_slug,
+    get_location_description,
+    get_all_location_slugs,
+    is_remote_enabled,
+    classify_job_location,
+)
 
 console = Console()
 
@@ -52,13 +60,8 @@ Return your response as valid JSON matching this schema:
 
 Be accurate and factual. If you're unsure about something, say so rather than making it up."""
 
-JOB_SEARCH_SYSTEM_PROMPT = """You are a job search assistant. Given information about a company, identify current job openings that match these target roles:
-- Engineering Manager
-- Software Manager
-- Technical Product Manager
-- Director of Analytics Engineering
-- Director of Engineering
-- VP of Engineering
+JOB_SEARCH_SYSTEM_PROMPT_TEMPLATE = """You are a job search assistant. Given information about a company, identify current job openings that match these target roles:
+{target_roles}
 
 Also look for related roles like:
 - Senior Engineering Manager
@@ -69,60 +72,51 @@ Also look for related roles like:
 Based on what you know about this company, list any current or likely job openings in these categories.
 
 Return your response as valid JSON:
-{
+{{
   "jobs": [
-    {
+    {{
       "title": "Job Title",
       "department": "Engineering/Product/etc",
       "location": "City, State or Remote",
-      "location_type": "boca|palo|remote",
+      "location_type": "<location_slug>",
       "url": "careers page URL if known, otherwise null",
       "posted_date": "approximate date or null",
       "requirements_summary": "Key requirements if known",
       "match_score": 0-100,
       "match_notes": "Why this role matches the candidate profile"
-    }
+    }}
   ],
   "careers_page": "URL to company careers page",
   "notes": "Any notes about job search at this company"
-}
+}}
 
-For location_type:
-- "boca" = Boca Raton, South Florida, Miami area
-- "palo" = Palo Alto, San Francisco Bay Area, Silicon Valley
-- "remote" = Remote/distributed
+For location_type, use one of these values based on the job's location:
+{location_type_rules}
 
 Be realistic - only include jobs you have reasonable confidence exist or are likely to exist based on company size and typical hiring patterns."""
 
-JOB_URL_PARSE_PROMPT = """You are a job posting parser. Given the raw content from a job posting URL, extract the key information.
+JOB_URL_PARSE_PROMPT_TEMPLATE = """You are a job posting parser. Given the raw content from a job posting URL, extract the key information.
 
 Return your response as valid JSON:
-{
+{{
   "company": "Company Name",
   "title": "Job Title",
   "department": "Engineering/Product/etc",
   "location": "City, State or Remote",
-  "location_type": "boca|palo|remote",
+  "location_type": "<location_slug>",
   "posted_date": "Date if found, otherwise null",
   "requirements_summary": "Key requirements (years experience, skills, etc)",
   "responsibilities_summary": "Key responsibilities",
   "compensation": "Salary/compensation if mentioned, otherwise null",
   "match_score": 0-100,
-  "match_notes": "Assessment of how well this matches an Engineering Manager / Technical Product Manager profile"
-}
+  "match_notes": "Assessment of how well this matches the target role profile"
+}}
 
 For location_type, use these rules:
-- "boca" = Boca Raton, South Florida, Miami, Fort Lauderdale, Palm Beach, or anywhere in Florida
-- "palo" = Palo Alto, San Francisco, Bay Area, Silicon Valley, San Jose, Mountain View, Sunnyvale, or anywhere in the SF Bay Area
-- "remote" = Remote, distributed, work from anywhere, or hybrid with remote option
-
-If the location doesn't match boca or palo, default to "remote".
+{location_type_rules}
 
 For match_score, consider how well the role aligns with these target profiles:
-- Engineering Manager (team leadership, technical management, software delivery)
-- Technical Product Manager (product strategy with technical depth)
-- Director of Engineering (senior leadership, multiple teams)
-- Director of Analytics Engineering (data platform leadership)
+{target_roles}
 
 Be thorough in extracting requirements and responsibilities."""
 
@@ -137,6 +131,49 @@ class CompanyResearcherAgent:
         self.research_dir = self.data_dir / "research"
         self.research_dir.mkdir(parents=True, exist_ok=True)
         self.learned_preferences = self._load_learned_preferences()
+
+    def _build_location_type_rules(self) -> str:
+        """Build location type rules from config for prompts."""
+        rules = []
+        locations = get_locations(self.config)
+
+        for location in locations:
+            slug = get_location_slug(location)
+            desc = get_location_description(location)
+            rules.append(f'- "{slug}" = {desc}')
+
+        if is_remote_enabled(self.config):
+            rules.append('- "remote" = Remote, distributed, work from anywhere, or hybrid with remote option')
+            rules.append('\nIf the location doesn\'t clearly match any configured location, default to "remote".')
+        elif locations:
+            default_slug = get_location_slug(locations[0])
+            rules.append(f'\nIf the location doesn\'t clearly match any configured location, default to "{default_slug}".')
+
+        return "\n".join(rules)
+
+    def _build_target_roles_text(self) -> str:
+        """Build target roles text from config for prompts."""
+        target_roles = self.config.get("preferences", {}).get("target_roles", [
+            "Engineering Manager",
+            "Software Manager",
+            "Technical Product Manager",
+            "Director of Analytics Engineering"
+        ])
+        return "\n".join(f"- {role}" for role in target_roles)
+
+    def _get_job_search_prompt(self) -> str:
+        """Build the job search system prompt with config-based locations."""
+        return JOB_SEARCH_SYSTEM_PROMPT_TEMPLATE.format(
+            target_roles=self._build_target_roles_text(),
+            location_type_rules=self._build_location_type_rules()
+        )
+
+    def _get_url_parse_prompt(self) -> str:
+        """Build the URL parse system prompt with config-based locations."""
+        return JOB_URL_PARSE_PROMPT_TEMPLATE.format(
+            target_roles=self._build_target_roles_text(),
+            location_type_rules=self._build_location_type_rules()
+        )
 
     def _load_learned_preferences(self) -> dict | None:
         """Load learned preferences if available."""
@@ -375,7 +412,7 @@ class CompanyResearcherAgent:
             content = content[:50000] + "\n... [truncated]"
 
         # Build system prompt with learned preferences for scoring
-        system_prompt = JOB_URL_PARSE_PROMPT + self._build_url_parse_context()
+        system_prompt = self._get_url_parse_prompt() + self._build_url_parse_context()
 
         response = self.client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -389,7 +426,14 @@ class CompanyResearcherAgent:
             ],
         )
 
-        return self._parse_json_response(response.content[0].text)
+        job = self._parse_json_response(response.content[0].text)
+
+        # Validate and correct location_type using our classifier
+        if job:
+            job_location = job.get("location", "")
+            job["location_type"] = classify_job_location(job_location, self.config)
+
+        return job
 
     def _build_url_parse_context(self) -> str:
         """Build learned context specifically for URL parsing/scoring."""
@@ -481,10 +525,23 @@ class CompanyResearcherAgent:
         # Build enhanced prompt with learned preferences
         learned_context = self._build_learned_context()
 
+        # Build location priorities from config
+        locations = get_locations(self.config)
+        location_priorities = []
+        for i, loc in enumerate(locations, 1):
+            location_priorities.append(f"{i}. {get_location_description(loc)}")
+        if is_remote_enabled(self.config):
+            location_priorities.append(f"{len(locations) + 1}. Remote / Distributed")
+        location_text = "\n".join(location_priorities)
+
+        # Get target roles from config
+        target_roles = self.config.get("preferences", {}).get("target_roles", [])
+        roles_text = ", ".join(target_roles) if target_roles else "Engineering Manager, Director, and Technical Product Manager"
+
         response = self.client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
-            system=JOB_SEARCH_SYSTEM_PROMPT + learned_context,
+            system=self._get_job_search_prompt() + learned_context,
             messages=[
                 {
                     "role": "user",
@@ -494,22 +551,24 @@ Company context:
 {context}
 
 Target locations (in priority order):
-1. Boca Raton / South Florida
-2. Palo Alto / Bay Area
-3. Remote
+{location_text}
 
-Find relevant Engineering Manager, Director, and Technical Product Manager roles.""",
+Find relevant {roles_text} roles.""",
                 }
             ],
         )
 
         jobs_data = self._parse_json_response(response.content[0].text)
 
-        # Add unique IDs and source to jobs
+        # Add unique IDs and source to jobs, and validate/correct location_type
         for job in jobs_data.get("jobs", []):
             job["id"] = f"JOB-{self._slugify(company_name).upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
             job["company"] = company_name
             job["source"] = "discovered"  # Mark as auto-discovered
+
+            # Validate and correct location_type using our classifier
+            job_location = job.get("location", "")
+            job["location_type"] = classify_job_location(job_location, self.config)
 
         return jobs_data
 
@@ -561,20 +620,31 @@ Find relevant Engineering Manager, Director, and Technical Product Manager roles
         if not jobs:
             return
 
-        # Group jobs by location
-        jobs_by_location: dict[str, list] = {"boca": [], "palo": [], "remote": []}
+        # Get all valid location slugs from config
+        all_slugs = get_all_location_slugs(self.config)
+
+        # Group jobs by location slug
+        jobs_by_location: dict[str, list] = {slug: [] for slug in all_slugs}
 
         for job in jobs:
-            loc = job.get("location_type", "remote")
-            if loc in jobs_by_location:
-                jobs_by_location[loc].append(job)
+            loc_type = job.get("location_type", "remote")
+            # Ensure the location_type is valid; fall back to remote if enabled
+            if loc_type not in jobs_by_location:
+                if is_remote_enabled(self.config) and "remote" in jobs_by_location:
+                    loc_type = "remote"
+                elif all_slugs:
+                    loc_type = all_slugs[0]  # Fall back to first configured location
+                else:
+                    continue  # Skip if no valid location
+
+            jobs_by_location[loc_type].append(job)
 
         # Update each location file
-        for location, location_jobs in jobs_by_location.items():
+        for location_slug, location_jobs in jobs_by_location.items():
             if not location_jobs:
                 continue
 
-            jobs_file = self.data_dir / f"jobs-{location}.json"
+            jobs_file = self.data_dir / f"jobs-{location_slug}.json"
 
             # Load existing jobs
             existing_data = {"jobs": []}

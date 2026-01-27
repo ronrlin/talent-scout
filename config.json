@@ -6,16 +6,38 @@
     "email": "ronrlin@gmail.com"
   },
   "preferences": {
-    "locations": ["boca", "palo", "remote"],
-    "target_roles": [
+    "locations": [
+      "Palo Alto, CA",
+      "Boca Raton, FL"
+      ],
+    "include_remote": true,
+    "roles": [
       "Engineering Manager",
       "Software Manager",
       "Technical Product Manager",
-      "Director of Analytics Engineering"
+      "Technical Program Manager",
+      "Director of Engineering",
+      "Analytics Engineering Manager",
+      "Data Engineering Manager",
+      "Director of Analytics Engineering",
+      "Head of Analytics Engineering",
+      "Head of Data & Intelligence",
+      "Head of Data Platforms",
+      "Director, Operational Analytics",
+      "Director, Data Infrastructure",
+      "Senior Engineering Manager",
+      "Manager, Platform Engineering",
+      "Manager, Data Platforms",
+      "Manager, Applied Engineering",
+      "Manager, Infrastructure & Data",
+      "Engineering Lead, Data & Analytics",
+      "Engineering Lead, Internal Products",
+      "Engineering Lead, Operational Systems",
+      "Head of Engineering"
     ],
     "min_company_size": 100,
     "prefer_public_companies": true,
-    "companies_per_location": 15
+    "companies_per_location": 30
   },
   "seeds": {
     "include": "./input/target-companies.json",

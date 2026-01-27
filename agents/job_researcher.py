@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from config_loader import get_anthropic_api_key
+from config_loader import get_anthropic_api_key, get_all_location_slugs
 
 console = Console()
 
@@ -406,8 +406,11 @@ class JobResearcherAgent:
 
     def _find_job(self, job_id: str) -> dict | None:
         """Find a job by ID across all location files."""
-        for location in ["boca", "palo", "remote"]:
-            jobs_file = self.data_dir / f"jobs-{location}.json"
+        # Get all location slugs from config
+        all_slugs = get_all_location_slugs(self.config)
+
+        for slug in all_slugs:
+            jobs_file = self.data_dir / f"jobs-{slug}.json"
             if not jobs_file.exists():
                 continue
 
@@ -416,7 +419,7 @@ class JobResearcherAgent:
 
             for job in data.get("jobs", []):
                 if job.get("id") == job_id:
-                    job["_location"] = location
+                    job["_location"] = slug
                     return job
 
         return None

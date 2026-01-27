@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from config_loader import get_anthropic_api_key
+from config_loader import get_anthropic_api_key, get_all_location_slugs
 
 console = Console()
 
@@ -295,14 +295,17 @@ Generate comprehensive targeting improvements based on both positive and negativ
         """Collect all jobs marked as imported."""
         imported_jobs = []
 
-        for location in ["boca", "palo", "remote"]:
-            jobs_file = self.data_dir / f"jobs-{location}.json"
+        # Get all location slugs from config
+        all_slugs = get_all_location_slugs(self.config)
+
+        for slug in all_slugs:
+            jobs_file = self.data_dir / f"jobs-{slug}.json"
             if jobs_file.exists():
                 with open(jobs_file) as f:
                     data = json.load(f)
                     for job in data.get("jobs", []):
                         if job.get("source") == "imported":
-                            job["_location_file"] = location
+                            job["_location_file"] = slug
                             imported_jobs.append(job)
 
         return imported_jobs
