@@ -15,15 +15,10 @@ Talent Scout is a Python CLI tool that automates job search activities: scouting
 ## Target User Profile
 
 **Geographic Preferences (Priority Order):**
-1. Boca Raton, FL (in-person) - Primary target, willing to accept lower compensation
-2. Palo Alto, CA (in-person) - Current location, expect premium compensation
-3. Remote - Enables Boca Raton relocation, flexible on compensation
+- Pick geographies
 
 **Target Roles:**
-- Engineering Manager
-- Software Manager
-- Technical Product Manager
-- Director of Analytics Engineering
+- Specify target roles
 
 **Target Companies:**
 - Public technology companies preferred
@@ -33,9 +28,7 @@ Talent Scout is a Python CLI tool that automates job search activities: scouting
 - User will provide seed list of target/excluded companies
 
 **Compensation Targets:**
-- Base cash: $300,000/year
-- Total comp (Silicon Valley): $500,000/year
-- Willing to accept lower for remote or Boca Raton roles
+- Specify compensation bands
 
 ---
 
@@ -62,9 +55,7 @@ scout companies [--location boca|palo|remote] [--count 15]
 - Industry databases (Crunchbase data where accessible)
 
 **Outputs:**
-- `data/companies-boca.json` - Companies with Boca Raton/South Florida presence
-- `data/companies-palo.json` - Companies in Palo Alto/Bay Area
-- `data/companies-remote.json` - Remote-friendly companies
+- `data/companies-{georgaphy}.json` 
 
 **Output Schema:**
 ```json
@@ -282,12 +273,6 @@ talent-scout/
 │   ├── target-companies.json
 │   └── excluded-companies.json
 ├── data/
-│   ├── companies-boca.json
-│   ├── companies-palo.json
-│   ├── companies-remote.json
-│   ├── jobs-boca.json
-│   ├── jobs-palo.json
-│   ├── jobs-remote.json
 │   ├── research/
 │   │   └── {company-slug}.json
 │   └── connections/
