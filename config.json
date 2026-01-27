@@ -1,0 +1,24 @@
+{
+  "user": {
+    "name": "Ron Lin",
+    "linkedin_url": "www.linkedin.com/in/ronlin",
+    "base_resume_path": "./input/base-resume.docx",
+    "email": "ronrlin@gmail.com"
+  },
+  "preferences": {
+    "locations": ["boca", "palo", "remote"],
+    "target_roles": [
+      "Engineering Manager",
+      "Software Manager",
+      "Technical Product Manager",
+      "Director of Analytics Engineering"
+    ],
+    "min_company_size": 100,
+    "prefer_public_companies": true,
+    "companies_per_location": 15
+  },
+  "seeds": {
+    "include": "./input/target-companies.json",
+    "exclude": "./input/excluded-companies.json"
+  }
+}
