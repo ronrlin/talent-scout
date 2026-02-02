@@ -1,15 +1,13 @@
 """Learning Agent - analyzes imported jobs to improve targeting."""
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 
-import anthropic
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from config_loader import get_anthropic_api_key, get_all_location_slugs
+from data_store import DataStore
+from .base_agent import BaseAgent
 
 console = Console()
 
@@ -138,58 +136,37 @@ Return your analysis as JSON:
 Be specific and actionable. Balance learning from both positive and negative signals."""
 
 
-class LearningAgent:
+class LearningAgent(BaseAgent):
     """Agent that learns from imported and deleted jobs to improve targeting."""
 
     def __init__(self, config: dict):
-        self.config = config
-        self.client = anthropic.Anthropic(api_key=get_anthropic_api_key())
-        self.data_dir = Path(__file__).parent.parent / "data"
-        self.preferences_file = self.data_dir / "learned-preferences.json"
-        self.deleted_jobs_file = self.data_dir / "deleted-jobs.json"
+        """Initialize the learning agent.
+
+        Args:
+            config: Configuration dictionary.
+        """
+        super().__init__(config)
+        self.data_store = DataStore(config)
 
     def record_deleted_job(self, job: dict, reason: str | None = None) -> None:
-        """Record a deleted job for negative learning."""
-        # Load existing deleted jobs
-        deleted_jobs = []
-        if self.deleted_jobs_file.exists():
-            with open(self.deleted_jobs_file) as f:
-                data = json.load(f)
-                deleted_jobs = data.get("jobs", [])
+        """Record a deleted job for negative learning.
 
-        # Add deletion metadata
-        job["deleted_at"] = datetime.now(timezone.utc).isoformat()
-        job["deletion_reason"] = reason
-
-        # Append to list
-        deleted_jobs.append(job)
-
-        # Save
-        with open(self.deleted_jobs_file, "w") as f:
-            json.dump({
-                "jobs": deleted_jobs,
-                "updated_at": datetime.now(timezone.utc).isoformat()
-            }, f, indent=2)
-
-    def _collect_deleted_jobs(self) -> list[dict]:
-        """Collect all deleted jobs."""
-        if not self.deleted_jobs_file.exists():
-            return []
-
-        with open(self.deleted_jobs_file) as f:
-            data = json.load(f)
-            return data.get("jobs", [])
+        Args:
+            job: The deleted job dictionary.
+            reason: Optional reason for deletion.
+        """
+        self.data_store.record_deleted_job(job, reason)
 
     def analyze_and_learn(self) -> dict | None:
         """Analyze imported and deleted jobs to generate learning insights."""
         # Collect all feedback
-        imported_jobs = self._collect_imported_jobs()
-        deleted_jobs = self._collect_deleted_jobs()
+        imported_jobs = self.data_store.get_jobs(source="imported")
+        deleted_jobs = self.data_store.get_deleted_jobs()
 
         if not imported_jobs and not deleted_jobs:
             console.print("[yellow]No feedback found. To improve targeting:[/yellow]")
-            console.print("  • Import jobs you like: scout research <job_url>")
-            console.print("  • Delete jobs you don't want: scout delete <job_id>")
+            console.print("  - Import jobs you like: scout research <job_url>")
+            console.print("  - Delete jobs you don't want: scout delete <job_id>")
             return None
 
         # Report what we're analyzing
@@ -230,17 +207,14 @@ class LearningAgent:
 
     def _analyze_combined(self, imported_jobs: list[dict], deleted_jobs: list[dict]) -> dict | None:
         """Analyze both imported and deleted jobs together."""
+        import json
         imported_text = json.dumps(imported_jobs, indent=2)
         deleted_text = json.dumps(deleted_jobs, indent=2)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=COMBINED_LEARNING_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Analyze this job search feedback:
+        try:
+            return self.client.complete_json(
+                system=COMBINED_LEARNING_PROMPT,
+                user=f"""Analyze this job search feedback:
 
 ## POSITIVE SIGNALS - {len(imported_jobs)} Imported Jobs (user WANTS more like these):
 {imported_text}
@@ -249,29 +223,26 @@ class LearningAgent:
 {deleted_text}
 
 Generate comprehensive targeting improvements based on both positive and negative feedback.""",
-                }
-            ],
-        )
-
-        return self._parse_json_response(response.content[0].text)
+                max_tokens=4096,
+            )
+        except ValueError as e:
+            console.print(f"[red]Error analyzing combined feedback: {e}[/red]")
+            return None
 
     def _analyze_deleted_only(self, deleted_jobs: list[dict]) -> dict | None:
         """Analyze only deleted jobs when no imports exist."""
+        import json
         deleted_text = json.dumps(deleted_jobs, indent=2)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=NEGATIVE_LEARNING_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Analyze these {len(deleted_jobs)} deleted/rejected job postings:\n\n{deleted_text}",
-                }
-            ],
-        )
-
-        result = self._parse_json_response(response.content[0].text)
+        try:
+            result = self.client.complete_json(
+                system=NEGATIVE_LEARNING_PROMPT,
+                user=f"Analyze these {len(deleted_jobs)} deleted/rejected job postings:\n\n{deleted_text}",
+                max_tokens=4096,
+            )
+        except ValueError as e:
+            console.print(f"[red]Error analyzing deleted jobs: {e}[/red]")
+            return None
 
         # Transform to standard format
         if result:
@@ -279,69 +250,38 @@ Generate comprehensive targeting improvements based on both positive and negativ
                 "analysis": {},
                 "negative_analysis": result.get("rejection_patterns", {}),
                 "improved_targeting": {
-                    "titles_to_avoid": result.get("rejection_patterns", {}).get("title_patterns_to_avoid", []),
-                    "red_flag_keywords": result.get("score_penalties", {}).get("title_keywords", []) +
-                                        result.get("score_penalties", {}).get("requirement_keywords", []),
+                    "titles_to_avoid": result.get("rejection_patterns", {}).get(
+                        "title_patterns_to_avoid", []
+                    ),
+                    "red_flag_keywords": result.get("score_penalties", {}).get(
+                        "title_keywords", []
+                    )
+                    + result.get("score_penalties", {}).get("requirement_keywords", []),
                 },
-                "scoring_adjustments": {
-                    "penalty_factors": result.get("score_penalties", {})
-                },
+                "scoring_adjustments": {"penalty_factors": result.get("score_penalties", {})},
                 "prompt_improvements": result.get("prompt_adjustments", {}),
                 "insights": result.get("insights", ""),
             }
         return None
 
-    def _collect_imported_jobs(self) -> list[dict]:
-        """Collect all jobs marked as imported."""
-        imported_jobs = []
-
-        # Get all location slugs from config
-        all_slugs = get_all_location_slugs(self.config)
-
-        for slug in all_slugs:
-            jobs_file = self.data_dir / f"jobs-{slug}.json"
-            if jobs_file.exists():
-                with open(jobs_file) as f:
-                    data = json.load(f)
-                    for job in data.get("jobs", []):
-                        if job.get("source") == "imported":
-                            job["_location_file"] = slug
-                            imported_jobs.append(job)
-
-        return imported_jobs
-
     def _analyze_jobs(self, jobs: list[dict]) -> dict | None:
         """Use Claude to analyze job patterns."""
-        # Format jobs for analysis
+        import json
         jobs_text = json.dumps(jobs, indent=2)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=LEARNING_ANALYSIS_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Analyze these {len(jobs)} manually imported job postings:\n\n{jobs_text}",
-                }
-            ],
-        )
-
-        return self._parse_json_response(response.content[0].text)
-
-    def _parse_json_response(self, text: str) -> dict | None:
-        """Parse Claude's JSON response."""
         try:
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-            return json.loads(text.strip())
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Error parsing response: {e}[/red]")
+            return self.client.complete_json(
+                system=LEARNING_ANALYSIS_PROMPT,
+                user=f"Analyze these {len(jobs)} manually imported job postings:\n\n{jobs_text}",
+                max_tokens=4096,
+            )
+        except ValueError as e:
+            console.print(f"[red]Error analyzing imported jobs: {e}[/red]")
             return None
 
-    def _save_preferences(self, analysis: dict, imported_jobs: list[dict], deleted_jobs: list[dict] = None) -> None:
+    def _save_preferences(
+        self, analysis: dict, imported_jobs: list[dict], deleted_jobs: list[dict] | None = None
+    ) -> None:
         """Save learned preferences to file."""
         deleted_jobs = deleted_jobs or []
 
@@ -359,18 +299,12 @@ Generate comprehensive targeting improvements based on both positive and negativ
             "insights": analysis.get("insights", ""),
         }
 
-        with open(self.preferences_file, "w") as f:
-            json.dump(preferences, f, indent=2)
-
-        console.print(f"[dim]Saved learned preferences to {self.preferences_file}[/dim]")
+        self.data_store.save_learned_preferences(preferences)
+        console.print(f"[dim]Saved learned preferences to data/learned-preferences.json[/dim]")
 
     def get_learned_preferences(self) -> dict | None:
         """Load previously learned preferences."""
-        if not self.preferences_file.exists():
-            return None
-
-        with open(self.preferences_file) as f:
-            return json.load(f)
+        return self.data_store.get_learned_preferences()
 
     def _print_analysis(self, analysis: dict, has_deleted: bool = False) -> None:
         """Print analysis summary."""
@@ -385,13 +319,13 @@ Generate comprehensive targeting improvements based on both positive and negativ
         # Positive targeting recommendations
         primary = targeting.get("primary_titles", [])
         if primary:
-            console.print("\n[bold green]✓ Job Titles to Target:[/bold green]")
+            console.print("\n[bold green]Job Titles to Target:[/bold green]")
             for title in primary[:5]:
-                console.print(f"  • {title}")
+                console.print(f"  - {title}")
 
         must_have = targeting.get("must_have_keywords", [])
         if must_have:
-            console.print("\n[bold green]✓ Must-Have Keywords:[/bold green]")
+            console.print("\n[bold green]Must-Have Keywords:[/bold green]")
             console.print(f"  {', '.join(must_have[:8])}")
 
         nice_to_have = targeting.get("nice_to_have_keywords", [])
@@ -402,22 +336,22 @@ Generate comprehensive targeting improvements based on both positive and negativ
         # Negative signals / things to avoid
         titles_to_avoid = targeting.get("titles_to_avoid", [])
         if titles_to_avoid:
-            console.print("\n[bold red]✗ Job Titles to Avoid:[/bold red]")
+            console.print("\n[bold red]Job Titles to Avoid:[/bold red]")
             for title in titles_to_avoid[:5]:
-                console.print(f"  • {title}")
+                console.print(f"  - {title}")
 
         red_flags = targeting.get("red_flag_keywords", [])
         if red_flags:
-            console.print("\n[bold red]✗ Red Flag Keywords (penalize):[/bold red]")
+            console.print("\n[bold red]Red Flag Keywords (penalize):[/bold red]")
             console.print(f"  {', '.join(red_flags[:8])}")
 
         # Show negative analysis if we have deleted jobs
         if has_deleted and negative:
             role_red_flags = negative.get("role_red_flags", [])
             if role_red_flags:
-                console.print("\n[bold red]✗ Role Characteristics to Avoid:[/bold red]")
+                console.print("\n[bold red]Role Characteristics to Avoid:[/bold red]")
                 for flag in role_red_flags[:4]:
-                    console.print(f"  • {flag}")
+                    console.print(f"  - {flag}")
 
         # Scoring adjustments
         scoring = analysis.get("scoring_adjustments", {})
@@ -427,20 +361,24 @@ Generate comprehensive targeting improvements based on both positive and negativ
             if boost or penalty:
                 console.print("\n[bold]Scoring Adjustments:[/bold]")
                 if boost:
-                    console.print(f"  [green]↑ Boost:[/green] {', '.join(boost[:4]) if isinstance(boost, list) else 'configured'}")
+                    console.print(
+                        f"  [green]Boost:[/green] {', '.join(boost[:4]) if isinstance(boost, list) else 'configured'}"
+                    )
                 if penalty:
-                    console.print(f"  [red]↓ Penalize:[/red] {', '.join(penalty[:4]) if isinstance(penalty, list) else 'configured'}")
+                    console.print(
+                        f"  [red]Penalize:[/red] {', '.join(penalty[:4]) if isinstance(penalty, list) else 'configured'}"
+                    )
 
         # Prompt improvements
         if improvements:
             console.print("\n[bold]Prompt Improvements Generated:[/bold]")
             if improvements.get("job_search_additions"):
-                console.print("  ✓ Job search prompt enhancements")
+                console.print("  - Job search prompt enhancements")
             if improvements.get("job_search_exclusions"):
-                console.print("  ✓ Job search exclusion rules")
+                console.print("  - Job search exclusion rules")
             if improvements.get("company_scout_additions"):
-                console.print("  ✓ Company scout prompt enhancements")
+                console.print("  - Company scout prompt enhancements")
             if improvements.get("match_scoring_criteria"):
-                console.print("  ✓ Match scoring criteria updates")
+                console.print("  - Match scoring criteria updates")
 
         console.print("\n[green]Learning complete! Future searches will use these insights.[/green]")

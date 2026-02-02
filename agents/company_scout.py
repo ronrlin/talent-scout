@@ -1,14 +1,11 @@
 """Company Scout Agent - discovers and prioritizes target companies."""
 
-import json
-from datetime import datetime, timezone
-from pathlib import Path
-
-import anthropic
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from config_loader import get_anthropic_api_key, get_location_slug, get_location_description
+from config_loader import get_location_slug, get_location_description
+from data_store import DataStore
+from .base_agent import BaseAgent
 
 console = Console()
 
@@ -49,84 +46,28 @@ Return your response as valid JSON matching this schema:
 Be thorough and accurate. Only include companies you're confident exist and match the criteria."""
 
 
-class CompanyScoutAgent:
+class CompanyScoutAgent(BaseAgent):
     """Agent that scouts and prioritizes target companies."""
 
     def __init__(self, config: dict):
-        self.config = config
-        self.client = anthropic.Anthropic(api_key=get_anthropic_api_key())
-        self.data_dir = Path(__file__).parent.parent / "data"
-        self.data_dir.mkdir(exist_ok=True)
-        self.learned_preferences = self._load_learned_preferences()
+        """Initialize the company scout agent.
 
-    def _load_learned_preferences(self) -> dict | None:
-        """Load learned preferences if available."""
-        prefs_file = self.data_dir / "learned-preferences.json"
-        if prefs_file.exists():
-            try:
-                with open(prefs_file) as f:
-                    prefs = json.load(f)
-                    console.print("[dim]Using learned preferences from job feedback[/dim]")
-                    return prefs
-            except Exception:
-                pass
-        return None
-
-    def _build_learned_context(self) -> str:
-        """Build additional prompt context from learned preferences."""
-        if not self.learned_preferences:
-            return ""
-
-        parts = ["\n\n--- LEARNED PREFERENCES FROM USER FEEDBACK ---"]
-
-        positive_analysis = self.learned_preferences.get("positive_analysis", self.learned_preferences.get("analysis", {}))
-        negative_analysis = self.learned_preferences.get("negative_analysis", {})
-        targeting = self.learned_preferences.get("improved_targeting", {})
-        improvements = self.learned_preferences.get("prompt_improvements", {})
-
-        # POSITIVE SIGNALS
-        parts.append("\n## POSITIVE SIGNALS (prioritize these):")
-
-        industries = positive_analysis.get("industry_patterns", [])
-        if industries:
-            parts.append(f"Preferred industries: {', '.join(industries[:5])}")
-
-        company_chars = positive_analysis.get("company_characteristics", [])
-        if company_chars:
-            parts.append(f"Preferred company traits: {', '.join(company_chars[:5])}")
-
-        ideal_profile = targeting.get("ideal_company_profile", "")
-        if ideal_profile:
-            parts.append(f"Ideal company profile: {ideal_profile}")
-
-        # NEGATIVE SIGNALS
-        has_negative = False
-        negative_parts = ["\n## NEGATIVE SIGNALS (deprioritize these):"]
-
-        companies_to_avoid = targeting.get("companies_to_avoid", "")
-        if companies_to_avoid:
-            negative_parts.append(f"Company types to avoid: {companies_to_avoid}")
-            has_negative = True
-
-        company_red_flags = negative_analysis.get("company_red_flags", [])
-        if company_red_flags:
-            negative_parts.append(f"Company red flags: {', '.join(company_red_flags[:5])}")
-            has_negative = True
-
-        if has_negative:
-            parts.extend(negative_parts)
-
-        # Additional guidance
-        scout_additions = improvements.get("company_scout_additions", "")
-        if scout_additions:
-            parts.append(f"\nAdditional guidance: {scout_additions}")
-
-        parts.append("\n--- END LEARNED PREFERENCES ---")
-
-        return "\n".join(parts)
+        Args:
+            config: Configuration dictionary.
+        """
+        super().__init__(config)
+        self.data_store = DataStore(config)
 
     def scout(self, location: str, count: int = 15) -> list[dict]:
-        """Scout companies for a given location."""
+        """Scout companies for a given location.
+
+        Args:
+            location: Target location (e.g., "Palo Alto, CA" or "remote").
+            count: Number of companies to find.
+
+        Returns:
+            List of company dictionaries sorted by priority score.
+        """
         # Get seed companies
         target_companies = self.config.get("target_companies", [])
         excluded_companies = self.config.get("excluded_companies", [])
@@ -146,20 +87,21 @@ class CompanyScoutAgent:
 
             # Build prompt with learned preferences
             prompt = self._build_prompt(location, seed_names, count)
-            system_prompt = SCOUT_SYSTEM_PROMPT + self._build_learned_context()
+            system_prompt = SCOUT_SYSTEM_PROMPT + self._build_learned_context("company_scout")
 
             # Call Claude
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4096,
-                system=system_prompt,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            try:
+                result = self.client.complete_json(
+                    system=system_prompt,
+                    user=prompt,
+                    max_tokens=4096,
+                )
+                companies = result.get("companies", [])
+            except ValueError as e:
+                console.print(f"[red]Error parsing response: {e}[/red]")
+                companies = []
 
             progress.update(task, description="Processing results...")
-
-            # Parse response
-            companies = self._parse_response(response.content[0].text)
 
             # Filter excluded companies
             companies = [
@@ -197,18 +139,27 @@ Expand on this list with additional companies that match my criteria.
 """
 
         # Get target roles from config
-        target_roles = self.config.get("preferences", {}).get("target_roles", [
-            "Engineering Manager",
-            "Software Manager",
-            "Technical Product Manager",
-            "Director of Analytics Engineering"
-        ])
+        target_roles = self.config.get("preferences", {}).get(
+            "target_roles",
+            [
+                "Engineering Manager",
+                "Software Manager",
+                "Technical Product Manager",
+                "Director of Analytics Engineering",
+            ],
+        )
         roles_text = "\n".join(f"- {role}" for role in target_roles)
 
         # Get company preferences
         min_size = self.config.get("preferences", {}).get("min_company_size", 100)
-        prefer_public = self.config.get("preferences", {}).get("prefer_public_companies", True)
-        public_pref = "Prefer public companies or well-funded late-stage startups" if prefer_public else "Consider both public and private companies"
+        prefer_public = self.config.get("preferences", {}).get(
+            "prefer_public_companies", True
+        )
+        public_pref = (
+            "Prefer public companies or well-funded late-stage startups"
+            if prefer_public
+            else "Consider both public and private companies"
+        )
 
         return f"""Find {count} technology companies that have offices or presence in {location_desc}.
 
@@ -225,51 +176,21 @@ Preferences:
 
 Return exactly {count} companies as JSON. Prioritize quality and fit over quantity."""
 
-    def _parse_response(self, text: str) -> list[dict]:
-        """Parse Claude's response into structured data."""
-        # Try to extract JSON from the response
-        try:
-            # Handle case where response might have markdown code blocks
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-
-            data = json.loads(text.strip())
-            return data.get("companies", [])
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Error parsing response: {e}[/red]")
-            console.print(f"[dim]Raw response: {text[:500]}...[/dim]")
-            return []
-
     def _save_results(self, location: str, companies: list[dict]) -> None:
         """Save results to JSON file."""
         slug = get_location_slug(location)
-        output_path = self.data_dir / f"companies-{slug}.json"
-
-        data = {
-            "location": location,
-            "location_slug": slug,
-            "location_description": get_location_description(location),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "count": len(companies),
-            "companies": companies,
-        }
-
-        with open(output_path, "w") as f:
-            json.dump(data, f, indent=2)
-
-        console.print(f"[dim]Saved to {output_path}[/dim]")
+        self.data_store.save_companies(companies, slug, location)
+        console.print(f"[dim]Saved to data/companies-{slug}.json[/dim]")
 
     def _print_summary(self, companies: list[dict]) -> None:
         """Print a summary of found companies."""
         console.print("\n[bold]Top companies found:[/bold]")
         for i, company in enumerate(companies[:5], 1):
             score = company.get("priority_score", "?")
-            public = "📈" if company.get("public") else "🏢"
+            public = "public" if company.get("public") else "private"
             console.print(
-                f"  {i}. {public} {company['name']} "
-                f"[dim](score: {score})[/dim]"
+                f"  {i}. {company['name']} "
+                f"[dim]({public}, score: {score})[/dim]"
             )
 
         if len(companies) > 5:

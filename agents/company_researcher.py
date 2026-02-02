@@ -4,23 +4,22 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
-import anthropic
 import httpx
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from config_loader import (
-    get_anthropic_api_key,
     get_locations,
     get_location_slug,
     get_location_description,
-    get_all_location_slugs,
     is_remote_enabled,
     classify_job_location,
 )
+from data_store import DataStore
+from .base_agent import BaseAgent
+from .job_importer import JobImporter
 
 console = Console()
 
@@ -95,179 +94,29 @@ For location_type, use one of these values based on the job's location:
 
 Be realistic - only include jobs you have reasonable confidence exist or are likely to exist based on company size and typical hiring patterns."""
 
-JOB_URL_PARSE_PROMPT_TEMPLATE = """You are a job posting parser. Given the raw content from a job posting URL, extract the key information.
 
-Return your response as valid JSON:
-{{
-  "company": "Company Name",
-  "title": "Job Title",
-  "department": "Engineering/Product/etc",
-  "location": "City, State or Remote",
-  "location_type": "<location_slug>",
-  "posted_date": "Date if found, otherwise null",
-  "requirements_summary": "Key requirements (years experience, skills, etc)",
-  "responsibilities_summary": "Key responsibilities",
-  "compensation": "Salary/compensation if mentioned, otherwise null",
-  "match_score": 0-100,
-  "match_notes": "Assessment of how well this matches the target role profile"
-}}
-
-For location_type, use these rules:
-{location_type_rules}
-
-For match_score, consider how well the role aligns with these target profiles:
-{target_roles}
-
-Be thorough in extracting requirements and responsibilities."""
-
-
-class CompanyResearcherAgent:
+class CompanyResearcherAgent(BaseAgent):
     """Agent that researches companies and discovers job openings."""
 
     def __init__(self, config: dict):
-        self.config = config
-        self.client = anthropic.Anthropic(api_key=get_anthropic_api_key())
-        self.data_dir = Path(__file__).parent.parent / "data"
-        self.research_dir = self.data_dir / "research"
-        self.research_dir.mkdir(parents=True, exist_ok=True)
-        self.learned_preferences = self._load_learned_preferences()
+        """Initialize the company researcher agent.
 
-    def _build_location_type_rules(self) -> str:
-        """Build location type rules from config for prompts."""
-        rules = []
-        locations = get_locations(self.config)
-
-        for location in locations:
-            slug = get_location_slug(location)
-            desc = get_location_description(location)
-            rules.append(f'- "{slug}" = {desc}')
-
-        if is_remote_enabled(self.config):
-            rules.append('- "remote" = Remote, distributed, work from anywhere, or hybrid with remote option')
-            rules.append('\nIf the location doesn\'t clearly match any configured location, default to "remote".')
-        elif locations:
-            default_slug = get_location_slug(locations[0])
-            rules.append(f'\nIf the location doesn\'t clearly match any configured location, default to "{default_slug}".')
-
-        return "\n".join(rules)
-
-    def _build_target_roles_text(self) -> str:
-        """Build target roles text from config for prompts."""
-        target_roles = self.config.get("preferences", {}).get("target_roles", [
-            "Engineering Manager",
-            "Software Manager",
-            "Technical Product Manager",
-            "Director of Analytics Engineering"
-        ])
-        return "\n".join(f"- {role}" for role in target_roles)
-
-    def _get_job_search_prompt(self) -> str:
-        """Build the job search system prompt with config-based locations."""
-        return JOB_SEARCH_SYSTEM_PROMPT_TEMPLATE.format(
-            target_roles=self._build_target_roles_text(),
-            location_type_rules=self._build_location_type_rules()
-        )
-
-    def _get_url_parse_prompt(self) -> str:
-        """Build the URL parse system prompt with config-based locations."""
-        return JOB_URL_PARSE_PROMPT_TEMPLATE.format(
-            target_roles=self._build_target_roles_text(),
-            location_type_rules=self._build_location_type_rules()
-        )
-
-    def _load_learned_preferences(self) -> dict | None:
-        """Load learned preferences if available."""
-        prefs_file = self.data_dir / "learned-preferences.json"
-        if prefs_file.exists():
-            try:
-                with open(prefs_file) as f:
-                    prefs = json.load(f)
-                    console.print("[dim]Using learned preferences from job feedback[/dim]")
-                    return prefs
-            except Exception:
-                pass
-        return None
-
-    def _build_learned_context(self) -> str:
-        """Build additional prompt context from learned preferences."""
-        if not self.learned_preferences:
-            return ""
-
-        parts = ["\n\n--- LEARNED PREFERENCES FROM USER FEEDBACK ---"]
-
-        targeting = self.learned_preferences.get("improved_targeting", {})
-        improvements = self.learned_preferences.get("prompt_improvements", {})
-        negative = self.learned_preferences.get("negative_analysis", {})
-        scoring = self.learned_preferences.get("scoring_adjustments", {})
-
-        # POSITIVE SIGNALS - what to look for
-        parts.append("\n## POSITIVE SIGNALS (prioritize these):")
-
-        primary_titles = targeting.get("primary_titles", [])
-        if primary_titles:
-            parts.append(f"Target job titles: {', '.join(primary_titles[:5])}")
-
-        must_have = targeting.get("must_have_keywords", [])
-        if must_have:
-            parts.append(f"Must-have keywords: {', '.join(must_have[:8])}")
-
-        nice_to_have = targeting.get("nice_to_have_keywords", [])
-        if nice_to_have:
-            parts.append(f"Bonus keywords (boost score): {', '.join(nice_to_have[:8])}")
-
-        # NEGATIVE SIGNALS - what to avoid
-        has_negative = False
-        negative_parts = ["\n## NEGATIVE SIGNALS (deprioritize/penalize these):"]
-
-        titles_to_avoid = targeting.get("titles_to_avoid", [])
-        if titles_to_avoid:
-            negative_parts.append(f"Avoid job titles containing: {', '.join(titles_to_avoid[:5])}")
-            has_negative = True
-
-        red_flags = targeting.get("red_flag_keywords", [])
-        if red_flags:
-            negative_parts.append(f"Red flag keywords (lower score): {', '.join(red_flags[:8])}")
-            has_negative = True
-
-        role_red_flags = negative.get("role_red_flags", [])
-        if role_red_flags:
-            negative_parts.append(f"Role characteristics to avoid: {', '.join(role_red_flags[:5])}")
-            has_negative = True
-
-        if has_negative:
-            parts.extend(negative_parts)
-
-        # Exclusions from prompt improvements
-        exclusions = improvements.get("job_search_exclusions", "")
-        if exclusions:
-            parts.append(f"\nExclusion rules: {exclusions}")
-
-        # Additional guidance
-        job_search_additions = improvements.get("job_search_additions", "")
-        if job_search_additions:
-            parts.append(f"\nAdditional guidance: {job_search_additions}")
-
-        # Scoring criteria
-        scoring_criteria = improvements.get("match_scoring_criteria", "")
-        if scoring_criteria:
-            parts.append(f"\nScoring criteria: {scoring_criteria}")
-
-        # Scoring adjustments
-        boost_factors = scoring.get("boost_factors", [])
-        penalty_factors = scoring.get("penalty_factors", [])
-        if boost_factors or penalty_factors:
-            parts.append("\n## SCORING ADJUSTMENTS:")
-            if boost_factors and isinstance(boost_factors, list):
-                parts.append(f"Boost score for: {', '.join(boost_factors[:5])}")
-            if penalty_factors and isinstance(penalty_factors, list):
-                parts.append(f"Penalize score for: {', '.join(penalty_factors[:5])}")
-
-        parts.append("\n--- END LEARNED PREFERENCES ---")
-
-        return "\n".join(parts)
+        Args:
+            config: Configuration dictionary.
+        """
+        super().__init__(config)
+        self.data_store = DataStore(config)
+        self.job_importer = JobImporter(config)
 
     def research(self, company_name: str) -> dict:
-        """Research a company and find job openings."""
+        """Research a company and find job openings.
+
+        Args:
+            company_name: Name of the company to research.
+
+        Returns:
+            Dictionary with company info, jobs, and metadata.
+        """
         slug = self._slugify(company_name)
 
         with Progress(
@@ -297,233 +146,66 @@ class CompanyResearcherAgent:
         }
 
         # Save research
-        self._save_research(slug, result)
+        self.data_store.save_research(slug, result)
+        console.print(f"[dim]Saved research to data/research/{slug}.json[/dim]")
 
         # Add jobs to location files
-        self._save_jobs(company_name, jobs_info.get("jobs", []))
+        jobs = jobs_info.get("jobs", [])
+        if jobs:
+            added = self.data_store.save_jobs(jobs, company_name)
+            if added > 0:
+                console.print(f"[dim]Added {added} job(s) to data files[/dim]")
 
         # Print summary
-        self._print_summary(company_info, jobs_info.get("jobs", []))
+        self._print_summary(company_info, jobs)
 
         return result
 
-    def import_job_from_markdown(self, content: str, filename: str) -> dict | None:
-        """Import a job posting from markdown content (copy-pasted job description).
+    def import_job_from_url(self, url: str) -> dict | None:
+        """Import a job posting from a URL.
+
+        Delegates to JobImporter.
 
         Args:
-            content: The markdown/text content of the job description
-            filename: The source filename (for reference)
+            url: URL of the job posting.
 
         Returns:
-            The imported job dict, or None if parsing failed
+            The imported job dictionary, or None if import failed.
         """
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task(f"Parsing {filename}...", total=None)
+        return self.job_importer.import_from_url(url)
 
-            # Parse with Claude (reuse the same parsing logic)
-            job = self._parse_job_posting(f"manual import from {filename}", content)
+    def import_job_from_markdown(self, content: str, filename: str) -> dict | None:
+        """Import a job posting from markdown content.
 
-            if not job:
-                console.print(f"[red]Could not parse job from {filename}[/red]")
-                return None
+        Delegates to JobImporter.
 
-        # Add ID and source tracking
-        company_name = job.get("company") or "unknown"
-        company_slug = self._slugify(company_name)
-        job["id"] = f"JOB-{company_slug.upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
-        job["url"] = None  # No URL for manual imports
-        job["source"] = "imported"  # Mark as manually imported for learning
-        job["imported_at"] = datetime.now(timezone.utc).isoformat()
-        job["source_file"] = filename
-        job["company"] = company_name  # Ensure company is set
+        Args:
+            content: The markdown/text content of the job description.
+            filename: The source filename (for reference).
 
-        # Save to appropriate location file
-        self._save_jobs(company_name, [job])
-
-        # Print summary
-        self._print_job_summary(job)
-
-        return job
-
-    def import_job_from_url(self, url: str) -> dict | None:
-        """Import a job posting from a URL."""
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            # Step 1: Fetch the URL
-            task = progress.add_task("Fetching job posting...", total=None)
-            content = self._fetch_url_content(url)
-
-            if not content:
-                console.print("[red]Could not fetch job posting from URL[/red]")
-                return None
-
-            # Step 2: Parse with Claude
-            progress.update(task, description="Parsing job details...")
-            job = self._parse_job_posting(url, content)
-
-            if not job:
-                console.print("[red]Could not parse job posting[/red]")
-                return None
-
-        # Add ID, URL, and source tracking
-        company_name = job.get("company") or "unknown"
-        company_slug = self._slugify(company_name)
-        job["id"] = f"JOB-{company_slug.upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
-        job["url"] = url
-        job["source"] = "imported"  # Mark as manually imported for learning
-        job["imported_at"] = datetime.now(timezone.utc).isoformat()
-        job["company"] = company_name  # Ensure company is set
-
-        # Save to appropriate location file
-        self._save_jobs(company_name, [job])
-
-        # Print summary
-        self._print_job_summary(job)
-
-        return job
-
-    def _fetch_url_content(self, url: str) -> str | None:
-        """Fetch content from a URL."""
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-            }
-            with httpx.Client(timeout=30, follow_redirects=True, headers=headers) as client:
-                response = client.get(url)
-                if response.status_code == 200:
-                    return response.text
-                else:
-                    console.print(f"[red]HTTP {response.status_code} fetching URL[/red]")
-        except Exception as e:
-            console.print(f"[red]Error fetching URL: {e}[/red]")
-        return None
-
-    def _parse_job_posting(self, url: str, content: str) -> dict | None:
-        """Parse job posting content with Claude."""
-        # Truncate content if too long (keep first 50k chars)
-        if len(content) > 50000:
-            content = content[:50000] + "\n... [truncated]"
-
-        # Build system prompt with learned preferences for scoring
-        system_prompt = self._get_url_parse_prompt() + self._build_url_parse_context()
-
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2048,
-            system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Parse this job posting from {url}:\n\n{content}",
-                }
-            ],
-        )
-
-        job = self._parse_json_response(response.content[0].text)
-
-        # Validate and correct location_type using our classifier
-        if job:
-            job_location = job.get("location", "")
-            job["location_type"] = classify_job_location(job_location, self.config)
-
-        return job
-
-    def _build_url_parse_context(self) -> str:
-        """Build learned context specifically for URL parsing/scoring."""
-        if not self.learned_preferences:
-            return ""
-
-        parts = ["\n\n--- LEARNED SCORING PREFERENCES ---"]
-        parts.append("Apply these preferences when calculating match_score:")
-
-        targeting = self.learned_preferences.get("improved_targeting", {})
-        negative = self.learned_preferences.get("negative_analysis", {})
-        scoring = self.learned_preferences.get("scoring_adjustments", {})
-
-        # Boost factors
-        primary_titles = targeting.get("primary_titles", [])
-        if primary_titles:
-            parts.append(f"\nBOOST SCORE (+15-25 points) for roles matching: {', '.join(primary_titles[:5])}")
-
-        must_have = targeting.get("must_have_keywords", [])
-        if must_have:
-            parts.append(f"BOOST SCORE (+10 points) if job contains: {', '.join(must_have[:6])}")
-
-        boost_factors = scoring.get("boost_factors", [])
-        if boost_factors and isinstance(boost_factors, list):
-            parts.append(f"Additional boost factors: {', '.join(boost_factors[:4])}")
-
-        # Penalty factors
-        titles_to_avoid = targeting.get("titles_to_avoid", [])
-        if titles_to_avoid:
-            parts.append(f"\nPENALIZE SCORE (-20-30 points) for roles matching: {', '.join(titles_to_avoid[:5])}")
-
-        red_flags = targeting.get("red_flag_keywords", [])
-        if red_flags:
-            parts.append(f"PENALIZE SCORE (-15 points) if job contains: {', '.join(red_flags[:6])}")
-
-        role_red_flags = negative.get("role_red_flags", [])
-        if role_red_flags:
-            parts.append(f"PENALIZE SCORE (-10 points) for: {', '.join(role_red_flags[:4])}")
-
-        penalty_factors = scoring.get("penalty_factors", [])
-        if penalty_factors and isinstance(penalty_factors, list):
-            parts.append(f"Additional penalty factors: {', '.join(penalty_factors[:4])}")
-
-        parts.append("\nApply these adjustments to arrive at the final match_score.")
-        parts.append("--- END SCORING PREFERENCES ---")
-
-        return "\n".join(parts)
-
-    def _print_job_summary(self, job: dict) -> None:
-        """Print summary of imported job."""
-        company = job.get("company", "Unknown")
-        title = job.get("title", "Unknown")
-        location = job.get("location", "Unknown")
-        location_type = job.get("location_type", "remote")
-        score = job.get("match_score", "?")
-        requirements = job.get("requirements_summary", "Not specified")
-
-        console.print(
-            Panel(
-                f"[bold]{title}[/bold] at [cyan]{company}[/cyan]\n"
-                f"[dim]Location: {location} ({location_type})[/dim]\n"
-                f"[dim]Match Score: {score}/100[/dim]\n\n"
-                f"[bold]Requirements:[/bold]\n{requirements}\n\n"
-                f"[dim]ID: {job['id']}[/dim]",
-                title="Job Imported",
-            )
-        )
+        Returns:
+            The imported job dictionary, or None if parsing failed.
+        """
+        return self.job_importer.import_from_markdown(content, filename)
 
     def _research_company(self, company_name: str) -> dict:
         """Get detailed company research from Claude."""
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=RESEARCH_SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Research this company: {company_name}\n\nProvide comprehensive information for a job seeker targeting Engineering Manager and Technical Product Manager roles.",
-                }
-            ],
-        )
-
-        return self._parse_json_response(response.content[0].text)
+        try:
+            return self.client.complete_json(
+                system=RESEARCH_SYSTEM_PROMPT,
+                user=f"Research this company: {company_name}\n\nProvide comprehensive information for a job seeker targeting Engineering Manager and Technical Product Manager roles.",
+                max_tokens=4096,
+            )
+        except ValueError as e:
+            console.print(f"[red]Error researching company: {e}[/red]")
+            return {}
 
     def _find_jobs(self, company_name: str, company_info: dict) -> dict:
         """Find job openings at the company."""
         context = json.dumps(company_info, indent=2) if company_info else "No additional context"
 
         # Build enhanced prompt with learned preferences
-        learned_context = self._build_learned_context()
+        learned_context = self._build_learned_context("job_search")
 
         # Build location priorities from config
         locations = get_locations(self.config)
@@ -536,16 +218,18 @@ class CompanyResearcherAgent:
 
         # Get target roles from config
         target_roles = self.config.get("preferences", {}).get("target_roles", [])
-        roles_text = ", ".join(target_roles) if target_roles else "Engineering Manager, Director, and Technical Product Manager"
+        roles_text = (
+            ", ".join(target_roles)
+            if target_roles
+            else "Engineering Manager, Director, and Technical Product Manager"
+        )
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=self._get_job_search_prompt() + learned_context,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Find job openings at {company_name}.
+        system_prompt = self._get_job_search_prompt() + learned_context
+
+        try:
+            jobs_data = self.client.complete_json(
+                system=system_prompt,
+                user=f"""Find job openings at {company_name}.
 
 Company context:
 {context}
@@ -554,23 +238,68 @@ Target locations (in priority order):
 {location_text}
 
 Find relevant {roles_text} roles.""",
-                }
-            ],
-        )
-
-        jobs_data = self._parse_json_response(response.content[0].text)
+                max_tokens=4096,
+            )
+        except ValueError as e:
+            console.print(f"[red]Error finding jobs: {e}[/red]")
+            jobs_data = {"jobs": []}
 
         # Add unique IDs and source to jobs, and validate/correct location_type
         for job in jobs_data.get("jobs", []):
             job["id"] = f"JOB-{self._slugify(company_name).upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
             job["company"] = company_name
-            job["source"] = "discovered"  # Mark as auto-discovered
+            job["source"] = "discovered"
 
             # Validate and correct location_type using our classifier
             job_location = job.get("location", "")
             job["location_type"] = classify_job_location(job_location, self.config)
 
         return jobs_data
+
+    def _get_job_search_prompt(self) -> str:
+        """Build the job search system prompt with config-based locations."""
+        return JOB_SEARCH_SYSTEM_PROMPT_TEMPLATE.format(
+            target_roles=self._build_target_roles_text(),
+            location_type_rules=self._build_location_type_rules(),
+        )
+
+    def _build_target_roles_text(self) -> str:
+        """Build target roles text from config for prompts."""
+        target_roles = self.config.get("preferences", {}).get(
+            "target_roles",
+            [
+                "Engineering Manager",
+                "Software Manager",
+                "Technical Product Manager",
+                "Director of Analytics Engineering",
+            ],
+        )
+        return "\n".join(f"- {role}" for role in target_roles)
+
+    def _build_location_type_rules(self) -> str:
+        """Build location type rules from config for prompts."""
+        rules = []
+        locations = get_locations(self.config)
+
+        for location in locations:
+            slug = get_location_slug(location)
+            desc = get_location_description(location)
+            rules.append(f'- "{slug}" = {desc}')
+
+        if is_remote_enabled(self.config):
+            rules.append(
+                '- "remote" = Remote, distributed, work from anywhere, or hybrid with remote option'
+            )
+            rules.append(
+                '\nIf the location doesn\'t clearly match any configured location, default to "remote".'
+            )
+        elif locations:
+            default_slug = get_location_slug(locations[0])
+            rules.append(
+                f'\nIf the location doesn\'t clearly match any configured location, default to "{default_slug}".'
+            )
+
+        return "\n".join(rules)
 
     def _fetch_careers_page(self, url: str | None) -> dict | None:
         """Attempt to fetch and analyze a careers page."""
@@ -581,25 +310,15 @@ Find relevant {roles_text} roles.""",
             with httpx.Client(timeout=10, follow_redirects=True) as client:
                 response = client.get(url)
                 if response.status_code == 200:
-                    return {"url": url, "status": "accessible", "content_length": len(response.text)}
+                    return {
+                        "url": url,
+                        "status": "accessible",
+                        "content_length": len(response.text),
+                    }
         except Exception as e:
             console.print(f"[dim]Could not fetch careers page: {e}[/dim]")
 
         return {"url": url, "status": "not_accessible"}
-
-    def _parse_json_response(self, text: str) -> dict:
-        """Parse Claude's JSON response."""
-        try:
-            # Handle markdown code blocks
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-
-            return json.loads(text.strip())
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Error parsing response: {e}[/red]")
-            return {}
 
     def _slugify(self, name: str) -> str:
         """Convert company name to slug."""
@@ -608,83 +327,6 @@ Find relevant {roles_text} roles.""",
         slug = slug.strip("-")
         return slug
 
-    def _save_research(self, slug: str, data: dict) -> None:
-        """Save research to JSON file."""
-        output_path = self.research_dir / f"{slug}.json"
-        with open(output_path, "w") as f:
-            json.dump(data, f, indent=2)
-        console.print(f"[dim]Saved research to {output_path}[/dim]")
-
-    def _save_jobs(self, company_name: str, jobs: list[dict]) -> None:
-        """Save jobs to location-specific files."""
-        if not jobs:
-            return
-
-        # Get all valid location slugs from config
-        all_slugs = get_all_location_slugs(self.config)
-
-        # Group jobs by location slug
-        jobs_by_location: dict[str, list] = {slug: [] for slug in all_slugs}
-
-        for job in jobs:
-            loc_type = job.get("location_type", "remote")
-            # Ensure the location_type is valid; fall back to remote if enabled
-            if loc_type not in jobs_by_location:
-                if is_remote_enabled(self.config) and "remote" in jobs_by_location:
-                    loc_type = "remote"
-                elif all_slugs:
-                    loc_type = all_slugs[0]  # Fall back to first configured location
-                else:
-                    continue  # Skip if no valid location
-
-            jobs_by_location[loc_type].append(job)
-
-        # Update each location file
-        for location_slug, location_jobs in jobs_by_location.items():
-            if not location_jobs:
-                continue
-
-            jobs_file = self.data_dir / f"jobs-{location_slug}.json"
-
-            # Load existing jobs
-            existing_data = {"jobs": []}
-            if jobs_file.exists():
-                with open(jobs_file) as f:
-                    existing_data = json.load(f)
-
-            # Add new jobs (avoid duplicates by ID, or by company+title+source for discovered jobs)
-            existing_ids = {j.get("id") for j in existing_data.get("jobs", [])}
-            existing_discovered = {
-                (j["company"], j["title"])
-                for j in existing_data.get("jobs", [])
-                if j.get("source") != "imported"
-            }
-
-            added_count = 0
-            for job in location_jobs:
-                # Skip if exact same ID already exists
-                if job.get("id") in existing_ids:
-                    continue
-
-                # For discovered jobs, skip if company+title matches another discovered job
-                # But always allow imported jobs (user explicitly added them)
-                if job.get("source") != "imported":
-                    key = (job["company"], job["title"])
-                    if key in existing_discovered:
-                        continue
-                    existing_discovered.add(key)
-
-                existing_data["jobs"].append(job)
-                existing_ids.add(job.get("id"))
-                added_count += 1
-
-            # Save updated jobs (only if something was added)
-            if added_count > 0:
-                existing_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-                with open(jobs_file, "w") as f:
-                    json.dump(existing_data, f, indent=2)
-                console.print(f"[dim]Added {added_count} jobs to {jobs_file}[/dim]")
-
     def _print_summary(self, company_info: dict, jobs: list[dict]) -> None:
         """Print research summary."""
         if company_info:
@@ -692,12 +334,12 @@ Find relevant {roles_text} roles.""",
             desc = company_info.get("description", "No description")
             industry = company_info.get("industry", "Unknown")
             employees = company_info.get("employee_count", "Unknown")
-            public = "📈 Public" if company_info.get("public") else "🏢 Private"
+            public = "Public" if company_info.get("public") else "Private"
 
             console.print(
                 Panel(
-                    f"[bold]{name}[/bold] {public}\n"
-                    f"[dim]{industry} • ~{employees} employees[/dim]\n\n"
+                    f"[bold]{name}[/bold] ({public})\n"
+                    f"[dim]{industry} - ~{employees} employees[/dim]\n\n"
                     f"{desc}",
                     title="Company Overview",
                 )
@@ -709,7 +351,7 @@ Find relevant {roles_text} roles.""",
                 score = job.get("match_score", "?")
                 loc = job.get("location", "Unknown")
                 console.print(
-                    f"  • {job['title']} [dim]({loc}, score: {score})[/dim]"
+                    f"  - {job['title']} [dim]({loc}, score: {score})[/dim]"
                 )
                 console.print(f"    [dim]ID: {job['id']}[/dim]")
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Talent Scout - AI-powered job search automation."""
 
-import json
 from pathlib import Path
 
 import click
@@ -15,10 +14,10 @@ from config_loader import (
     get_all_location_slugs,
     is_remote_enabled,
 )
+from data_store import DataStore
 from agents import CompanyScoutAgent, CompanyResearcherAgent, LearningAgent, JobResearcherAgent
 
 console = Console()
-DATA_DIR = Path(__file__).parent / "data"
 IMPORT_DIR = Path(__file__).parent / "import-jobs"
 
 
@@ -70,6 +69,7 @@ def cli(ctx):
     """Talent Scout - AI-powered job search automation."""
     ctx.ensure_object(dict)
     ctx.obj["config"] = load_config()
+    ctx.obj["data_store"] = DataStore(ctx.obj["config"])
 
 
 @cli.command()
@@ -236,40 +236,29 @@ def import_jobs(ctx):
 def jobs(ctx, location: str, company: str | None):
     """List discovered job opportunities."""
     config = ctx.obj["config"]
+    data_store = ctx.obj["data_store"]
     all_location_slugs = get_all_location_slugs(config)
 
-    # Determine which location slugs to load
+    # Determine which location slug to use
+    location_slug = None
     if location.lower() == "all":
-        slugs_to_load = all_location_slugs
+        location_slug = None  # Get all
     elif location.lower() == "remote":
-        slugs_to_load = ["remote"]
+        location_slug = "remote"
     else:
         # Try to match the location to a slug
         slug = get_location_slug(location)
         if slug in all_location_slugs:
-            slugs_to_load = [slug]
+            location_slug = slug
         else:
             # Try partial match on configured locations
             configured_locations = get_locations(config)
             matched = [loc for loc in configured_locations if location.lower() in loc.lower()]
             if matched:
-                slugs_to_load = [get_location_slug(loc) for loc in matched]
-            else:
-                slugs_to_load = all_location_slugs  # Fall back to all
+                location_slug = get_location_slug(matched[0])
 
-    all_jobs = []
-    for slug in slugs_to_load:
-        jobs_file = DATA_DIR / f"jobs-{slug}.json"
-        if jobs_file.exists():
-            with open(jobs_file) as f:
-                data = json.load(f)
-                for job in data.get("jobs", []):
-                    job["_location_file"] = slug
-                    all_jobs.append(job)
-
-    # Filter by company if specified
-    if company:
-        all_jobs = [j for j in all_jobs if company.lower() in j.get("company", "").lower()]
+    # Get jobs using DataStore
+    all_jobs = data_store.get_jobs(location_slug=location_slug, company=company)
 
     if not all_jobs:
         console.print("[yellow]No jobs found. Run 'scout research <company>' to discover jobs.[/yellow]")
@@ -328,10 +317,11 @@ def delete(ctx, job_id: str, reason: str | None):
     improving future job discovery and prioritization.
     """
     config = ctx.obj["config"]
+    data_store = ctx.obj["data_store"]
     agent = LearningAgent(config)
 
-    # Find and remove the job
-    job, location = _find_and_remove_job(job_id, config)
+    # Find and remove the job using DataStore
+    job = data_store.delete_job(job_id)
 
     if not job:
         console.print(f"[red]Job not found: {job_id}[/red]")
@@ -343,34 +333,6 @@ def delete(ctx, job_id: str, reason: str | None):
 
     console.print(f"[green]Removed:[/green] {job.get('title')} at {job.get('company')}")
     console.print(f"[dim]This feedback will improve future targeting. Run 'scout learn' to update.[/dim]")
-
-
-def _find_and_remove_job(job_id: str, config: dict) -> tuple[dict | None, str | None]:
-    """Find a job by ID and remove it from its location file."""
-    all_slugs = get_all_location_slugs(config)
-
-    for slug in all_slugs:
-        jobs_file = DATA_DIR / f"jobs-{slug}.json"
-        if not jobs_file.exists():
-            continue
-
-        with open(jobs_file) as f:
-            data = json.load(f)
-
-        jobs = data.get("jobs", [])
-        for i, job in enumerate(jobs):
-            if job.get("id") == job_id:
-                # Remove the job
-                removed_job = jobs.pop(i)
-                data["jobs"] = jobs
-
-                # Save updated file
-                with open(jobs_file, "w") as f:
-                    json.dump(data, f, indent=2)
-
-                return removed_job, slug
-
-    return None, None
 
 
 @cli.command()
@@ -501,16 +463,8 @@ def cover_letter_gen(ctx, job_id: str):
 def resume_improve(ctx, job_id: str):
     """Iteratively improve a resume for better job alignment.
 
-    This command takes an existing tailored resume and improves it
-    through multiple passes to better align with the job requirements
-    while maintaining credibility and accuracy.
-
-    The process:
-    1. Analyzes job requirements and implicit hiring criteria
-    2. Evaluates current resume alignment
-    3. Identifies improvement opportunities
-    4. Iteratively revises until strongly aligned
-    5. Outputs summary of changes made
+    Reviews an existing resume against the job description and
+    makes targeted improvements while maintaining credibility.
     """
     config = ctx.obj["config"]
     console.print(f"\n[bold blue]Improving resume for: {job_id}[/bold blue]\n")

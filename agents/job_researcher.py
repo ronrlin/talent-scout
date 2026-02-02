@@ -5,14 +5,13 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
 from docx import Document
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.table import Table
 
-from config_loader import get_anthropic_api_key, get_all_location_slugs
+from data_store import DataStore
+from .base_agent import BaseAgent
 
 console = Console()
 
@@ -233,15 +232,17 @@ Return your response as valid JSON:
 }"""
 
 
-class JobResearcherAgent:
+class JobResearcherAgent(BaseAgent):
     """Agent that analyzes jobs and generates customized application materials."""
 
     def __init__(self, config: dict):
-        self.config = config
-        self.client = anthropic.Anthropic(api_key=get_anthropic_api_key())
-        self.data_dir = Path(__file__).parent.parent / "data"
-        self.output_dir = Path(__file__).parent.parent / "output"
-        self.input_dir = Path(__file__).parent.parent / "input"
+        """Initialize the job researcher agent.
+
+        Args:
+            config: Configuration dictionary.
+        """
+        super().__init__(config)
+        self.data_store = DataStore(config)
 
         # Ensure output directories exist
         (self.output_dir / "resumes").mkdir(parents=True, exist_ok=True)
@@ -251,7 +252,7 @@ class JobResearcherAgent:
     def analyze_job(self, job_id: str) -> dict | None:
         """Analyze a job posting and match against user's profile."""
         # Find the job
-        job = self._find_job(job_id)
+        job = self.data_store.get_job(job_id)
         if not job:
             console.print(f"[red]Job not found: {job_id}[/red]")
             return None
@@ -289,7 +290,7 @@ class JobResearcherAgent:
     def generate_resume(self, job_id: str) -> str | None:
         """Generate a customized resume for a job."""
         # Find the job
-        job = self._find_job(job_id)
+        job = self.data_store.get_job(job_id)
         if not job:
             console.print(f"[red]Job not found: {job_id}[/red]")
             return None
@@ -348,7 +349,7 @@ class JobResearcherAgent:
     def generate_cover_letter(self, job_id: str) -> str | None:
         """Generate a cover letter for a job."""
         # Find the job
-        job = self._find_job(job_id)
+        job = self.data_store.get_job(job_id)
         if not job:
             console.print(f"[red]Job not found: {job_id}[/red]")
             return None
@@ -404,26 +405,6 @@ class JobResearcherAgent:
 
         return str(md_path)
 
-    def _find_job(self, job_id: str) -> dict | None:
-        """Find a job by ID across all location files."""
-        # Get all location slugs from config
-        all_slugs = get_all_location_slugs(self.config)
-
-        for slug in all_slugs:
-            jobs_file = self.data_dir / f"jobs-{slug}.json"
-            if not jobs_file.exists():
-                continue
-
-            with open(jobs_file) as f:
-                data = json.load(f)
-
-            for job in data.get("jobs", []):
-                if job.get("id") == job_id:
-                    job["_location"] = slug
-                    return job
-
-        return None
-
     def _get_role_lens_guidance(self, role_lens: str, doc_type: str) -> str:
         """Return role-lens specific guidance for resume or cover letter generation."""
         guidance = {
@@ -473,16 +454,9 @@ class JobResearcherAgent:
         return guidance.get(role_lens, guidance["engineering"]).get(doc_type, "")
 
     def _determine_role_lens(self, job: dict) -> str:
-        """Determine the role lens (engineering | product | program) based on job title and description.
-
-        The role_lens shapes the language and emphasis in resumes and cover letters:
-        - engineering: Focus on technical systems, architecture, code, team scaling
-        - product: Focus on product strategy, roadmaps, customer outcomes, metrics
-        - program: Focus on cross-functional coordination, delivery, process, stakeholder management
-        """
+        """Determine the role lens (engineering | product | program) based on job title and description."""
         title = job.get("title", "").lower()
         department = job.get("department", "").lower()
-        requirements = job.get("requirements_summary", "").lower()
 
         # Check for product indicators
         product_keywords = ["product manager", "product lead", "product director", "tpm", "technical product"]
@@ -494,7 +468,7 @@ class JobResearcherAgent:
         if any(kw in title for kw in program_keywords):
             return "program"
 
-        # Check for engineering indicators (default for ambiguous cases with eng focus)
+        # Check for engineering indicators
         engineering_keywords = ["engineering manager", "engineer", "software", "data engineer", "analytics engineer",
                                 "director of engineering", "vp engineering", "head of engineering", "staff engineer"]
         if any(kw in title for kw in engineering_keywords):
@@ -548,14 +522,10 @@ class JobResearcherAgent:
         """Analyze how well the resume matches the job."""
         job_text = json.dumps(job, indent=2)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=JOB_ANALYSIS_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Analyze this job posting and candidate resume:
+        try:
+            return self.client.complete_json(
+                system=JOB_ANALYSIS_PROMPT,
+                user=f"""Analyze this job posting and candidate resume:
 
 ## JOB POSTING:
 {job_text}
@@ -564,11 +534,11 @@ class JobResearcherAgent:
 {resume_text}
 
 Provide a detailed match analysis and recommendations.""",
-                }
-            ],
-        )
-
-        return self._parse_json_response(response.content[0].text)
+                max_tokens=4096,
+            )
+        except ValueError as e:
+            console.print(f"[red]Error analyzing job: {e}[/red]")
+            return None
 
     def _generate_resume_content(self, job: dict, resume_text: str, analysis: dict | None, role_lens: str) -> str | None:
         """Generate customized resume content."""
@@ -578,14 +548,9 @@ Provide a detailed match analysis and recommendations.""",
         # Role-lens specific guidance
         role_lens_guidance = self._get_role_lens_guidance(role_lens, "resume")
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
+        response = self.client.complete(
             system=RESUME_GENERATION_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Create a customized resume for this job:
+            user=f"""Create a customized resume for this job:
 
 ## TARGET JOB:
 {job_text}
@@ -603,11 +568,10 @@ Ensure that the Professional Summary and the resume overall reflect the {role_le
 
 Generate a tailored resume in Markdown format.
 .""",
-                }
-            ],
+            max_tokens=4096,
         )
 
-        return response.content[0].text
+        return response
 
     def _generate_cover_letter_content(self, job: dict, resume_text: str, analysis: dict | None, role_lens: str) -> str | None:
         """Generate cover letter content."""
@@ -617,14 +581,9 @@ Generate a tailored resume in Markdown format.
         # Role-lens specific guidance
         role_lens_guidance = self._get_role_lens_guidance(role_lens, "cover_letter")
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2048,
+        response = self.client.complete(
             system=COVER_LETTER_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Create a cover letter for this job application:
+            user=f"""Create a cover letter for this job application:
 
 ## TARGET JOB:
 {job_text}
@@ -671,24 +630,18 @@ Length:
 - Approximately 200–300 words total.
 
 Output only the cover letter in Markdown.""",
-                }
-            ],
+            max_tokens=2048,
         )
 
-        return response.content[0].text
+        return response
 
     def _refine_cover_letter_specificity(self, cover_letter: str, job: dict) -> str:
         """Second pass: review and rewrite generic sentences to be company-specific."""
         job_text = json.dumps(job, indent=2)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2048,
+        return self.client.complete(
             system=COVER_LETTER_SPECIFICITY_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Review this cover letter and rewrite any generic sentences to be specific to this company and role.
+            user=f"""Review this cover letter and rewrite any generic sentences to be specific to this company and role.
 
 ## TARGET COMPANY/ROLE:
 {job_text}
@@ -697,24 +650,16 @@ Output only the cover letter in Markdown.""",
 {cover_letter}
 
 Output only the refined cover letter in Markdown.""",
-                }
-            ],
+            max_tokens=2048,
         )
-
-        return response.content[0].text
 
     def _refine_resume_defensibility(self, resume: str, job: dict, base_resume: str) -> str:
         """Second pass: review resume for defensibility and remove generic/inflated content."""
         job_text = json.dumps(job, indent=2)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
+        return self.client.complete(
             system=RESUME_DEFENSIBILITY_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Review this tailored resume for defensibility and authenticity.
+            user=f"""Review this tailored resume for defensibility and authenticity.
 
 ## TARGET JOB (for context on what might be keyword-stuffed):
 {job_text}
@@ -726,11 +671,8 @@ Output only the refined cover letter in Markdown.""",
 {resume}
 
 Ensure every claim is defensible and grounded in the original resume. Remove or tone down anything that sounds inflated or mirrors the job description too closely. Output only the refined resume in Markdown.""",
-                }
-            ],
+            max_tokens=4096,
         )
-
-        return response.content[0].text
 
     def _save_analysis(self, job_id: str, job: dict, analysis: dict) -> None:
         """Save job analysis to file."""
@@ -758,17 +700,9 @@ Ensure every claim is defensible and grounded in the original resume. Remove or 
         return None
 
     def find_document_by_job_id(self, job_id: str, doc_type: str) -> Path | None:
-        """Find an existing markdown document by job_id.
-
-        Args:
-            job_id: The job ID to search for
-            doc_type: Either 'resume' or 'cover-letter'
-
-        Returns:
-            Path to the markdown file if found, None otherwise
-        """
-        # First, find the job to get company and title
-        job = self._find_job(job_id)
+        """Find an existing markdown document by job_id."""
+        # Find the job to get company and title
+        job = self.data_store.get_job(job_id)
         if not job:
             return None
 
@@ -787,7 +721,7 @@ Ensure every claim is defensible and grounded in the original resume. Remove or 
         if exact_path.exists():
             return exact_path
 
-        # Fall back to searching for partial match (in case of filename truncation)
+        # Fall back to searching for partial match
         if search_dir.exists():
             for md_file in search_dir.glob("*.md"):
                 if company_name in md_file.name and job_title[:20] in md_file.name:
@@ -796,28 +730,13 @@ Ensure every claim is defensible and grounded in the original resume. Remove or 
         return None
 
     def regenerate_pdf(self, md_path: Path, doc_type: str) -> Path | None:
-        """Regenerate PDF from an existing markdown file.
-
-        Args:
-            md_path: Path to the markdown file
-            doc_type: Either 'resume' or 'cover-letter'
-
-        Returns:
-            Path to the generated PDF if successful, None otherwise
-        """
+        """Regenerate PDF from an existing markdown file."""
         return self._convert_to_pdf(md_path, doc_type)
 
     def improve_resume(self, job_id: str) -> str | None:
-        """Iteratively improve an existing resume to better align with a job.
-
-        Args:
-            job_id: The job ID to improve the resume for
-
-        Returns:
-            Path to the improved resume if successful, None otherwise
-        """
+        """Iteratively improve an existing resume to better align with a job."""
         # Find the job
-        job = self._find_job(job_id)
+        job = self.data_store.get_job(job_id)
         if not job:
             console.print(f"[red]Job not found: {job_id}[/red]")
             return None
@@ -833,7 +752,7 @@ Ensure every claim is defensible and grounded in the original resume. Remove or 
         with open(resume_path) as f:
             current_resume = f.read()
 
-        # Load base resume for reference (original facts)
+        # Load base resume for reference
         base_resume = self._load_base_resume()
         if not base_resume:
             console.print("[red]Could not load base resume[/red]")
@@ -850,14 +769,10 @@ Ensure every claim is defensible and grounded in the original resume. Remove or 
             task = progress.add_task("Analyzing and improving resume...", total=None)
 
             # Call Claude to improve the resume
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=8000,
-                system=RESUME_IMPROVE_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"""Improve this resume to better align with the target job.
+            try:
+                result = self.client.complete_json(
+                    system=RESUME_IMPROVE_PROMPT,
+                    user=f"""Improve this resume to better align with the target job.
 
 TARGET JOB:
 {job_context}
@@ -868,16 +783,11 @@ CURRENT TAILORED RESUME:
 BASE RESUME (original facts - do not invent beyond this):
 {base_resume}
 
-Analyze the current resume against the job requirements, identify improvement opportunities, and iteratively revise until the resume is strongly aligned with the job while remaining credible and defensible."""
-                    }
-                ]
-            )
-
-            result_text = response.content[0].text
-            result = self._parse_json_response(result_text)
-
-            if not result:
-                console.print("[red]Failed to parse improvement response[/red]")
+Analyze the current resume against the job requirements, identify improvement opportunities, and iteratively revise until the resume is strongly aligned with the job while remaining credible and defensible.""",
+                    max_tokens=8000,
+                )
+            except ValueError as e:
+                console.print(f"[red]Failed to parse improvement response: {e}[/red]")
                 return None
 
             progress.update(task, description="Saving improved resume...")
@@ -890,7 +800,7 @@ Analyze the current resume against the job requirements, identify improvement op
                 console.print("[red]No improved resume in response[/red]")
                 return None
 
-            # Save the improved resume (overwrite the existing one)
+            # Save the improved resume
             with open(resume_path, "w") as f:
                 f.write(improved_resume)
 
@@ -901,7 +811,7 @@ Analyze the current resume against the job requirements, identify improvement op
 
         # Print improvement summary
         console.print(Panel(
-            "\n".join(f"• {item}" for item in improvement_summary),
+            "\n".join(f"- {item}" for item in improvement_summary),
             title="[bold green]Improvement Summary[/bold green]",
             border_style="green"
         ))
@@ -930,18 +840,13 @@ Analyze the current resume against the job requirements, identify improvement op
 
         # Try to load full job details from research file
         company_name = job.get("company", "").lower().replace(" ", "-")
-        research_file = self.data_dir / "research" / f"{company_name}.json"
-        if research_file.exists():
-            try:
-                with open(research_file) as f:
-                    research = json.load(f)
-                company_info = research.get("company", {})
-                if company_info.get("description"):
-                    parts.append(f"\nCompany Description:\n{company_info.get('description')}")
-                if company_info.get("engineering_culture"):
-                    parts.append(f"\nEngineering Culture:\n{company_info.get('engineering_culture')}")
-            except Exception:
-                pass
+        research = self.data_store.get_research(company_name)
+        if research:
+            company_info = research.get("company", {})
+            if company_info.get("description"):
+                parts.append(f"\nCompany Description:\n{company_info.get('description')}")
+            if company_info.get("engineering_culture"):
+                parts.append(f"\nEngineering Culture:\n{company_info.get('engineering_culture')}")
 
         return "\n".join(parts)
 
@@ -949,14 +854,13 @@ Analyze the current resume against the job requirements, identify improvement op
         """Convert markdown to PDF using weasyprint."""
         try:
             import markdown
-            from weasyprint import HTML, CSS
+            from weasyprint import HTML
 
             # Read markdown
             with open(md_path) as f:
                 md_content = f.read()
 
-            # Normalize bullet characters to standard markdown
-            # LLM sometimes outputs • instead of - which markdown doesn't recognize as lists
+            # Normalize bullet characters
             md_content = re.sub(r'^•\s*', '- ', md_content, flags=re.MULTILINE)
 
             # Convert to HTML
@@ -988,22 +892,9 @@ Analyze the current resume against the job requirements, identify improvement op
 
     def _sanitize_filename(self, name: str) -> str:
         """Sanitize a string for use in filenames."""
-        # Remove or replace invalid characters
         sanitized = re.sub(r'[<>:"/\\|?*]', '', name)
         sanitized = sanitized.strip()
-        return sanitized[:50]  # Limit length
-
-    def _parse_json_response(self, text: str) -> dict | None:
-        """Parse Claude's JSON response."""
-        try:
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-            return json.loads(text.strip())
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Error parsing response: {e}[/red]")
-            return None
+        return sanitized[:50]
 
     def _print_analysis(self, job: dict, analysis: dict) -> None:
         """Print job analysis summary."""
@@ -1027,16 +918,16 @@ Analyze the current resume against the job requirements, identify improvement op
         # Strengths
         strengths = match.get("strengths", [])
         if strengths:
-            console.print("\n[bold green]✓ Your Strengths:[/bold green]")
+            console.print("\n[bold green]Your Strengths:[/bold green]")
             for s in strengths[:4]:
-                console.print(f"  • {s}")
+                console.print(f"  - {s}")
 
         # Gaps
         gaps = match.get("gaps", [])
         if gaps:
-            console.print("\n[bold yellow]⚠ Potential Gaps:[/bold yellow]")
+            console.print("\n[bold yellow]Potential Gaps:[/bold yellow]")
             for g in gaps[:3]:
-                console.print(f"  • {g}")
+                console.print(f"  - {g}")
 
         # Keywords to include
         keywords = recs.get("keywords_to_include", [])
