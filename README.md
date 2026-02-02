@@ -198,7 +198,7 @@ Find target companies in a specific location:
 
 ```bash
 scout companies --location "Palo Alto, CA" --count 10
-scout companies --location "Boca Raton, FL" --count 15
+scout companies --location "Boca Raton, FL" --count 30
 scout companies --location remote
 scout companies --location all  # Scout all configured locations
 ```

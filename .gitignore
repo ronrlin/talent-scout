@@ -6,6 +6,8 @@ __pycache__/
 
 # Claude / local tooling state
 .claude/
+.worktreeinclude
+
 
 # Generated / runtime data
 data/
