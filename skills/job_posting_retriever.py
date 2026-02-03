@@ -1,13 +1,11 @@
-"""Job Importer - imports jobs from URLs and markdown files."""
+"""Job Posting Retriever Skill - fetches and parses job postings from URLs or markdown."""
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from config_loader import (
     get_locations,
@@ -16,10 +14,8 @@ from config_loader import (
     is_remote_enabled,
     classify_job_location,
 )
-from data_store import DataStore
-from .base_agent import BaseAgent
+from .base_skill import BaseSkill, SkillContext, SkillResult
 
-console = Console()
 
 JOB_URL_PARSE_PROMPT_TEMPLATE = """You are a job posting parser. Given the raw content from a job posting URL, extract the key information.
 
@@ -47,47 +43,59 @@ For match_score, consider how well the role aligns with these target profiles:
 Be thorough in extracting requirements and responsibilities."""
 
 
-class JobImporter(BaseAgent):
-    """Agent that imports jobs from URLs and markdown files."""
+@dataclass
+class JobPostingResult:
+    """Result of job posting retrieval."""
 
-    def __init__(self, config: dict):
-        """Initialize the job importer.
+    job: dict
+    """Parsed job dictionary with ID and metadata."""
+
+    source_url: str | None
+    """Source URL if imported from URL."""
+
+    source_file: str | None
+    """Source filename if imported from markdown."""
+
+
+class JobPostingRetrieverSkill(BaseSkill):
+    """Skill that fetches and parses job postings from URLs or markdown content."""
+
+    def execute(
+        self,
+        context: SkillContext,
+        url: str | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+    ) -> SkillResult:
+        """Fetch and parse a job posting.
 
         Args:
-            config: Configuration dictionary.
-        """
-        super().__init__(config)
-        self.data_store = DataStore(config)
-
-    def import_from_url(self, url: str) -> dict | None:
-        """Import a job posting from a URL.
-
-        Args:
-            url: URL of the job posting.
+            context: Execution context with config and learned preferences.
+            url: URL to fetch job posting from.
+            content: Markdown/text content to parse (alternative to URL).
+            filename: Source filename when using content.
 
         Returns:
-            The imported job dictionary, or None if import failed.
+            SkillResult with JobPostingResult data.
         """
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            # Step 1: Fetch the URL
-            task = progress.add_task("Fetching job posting...", total=None)
-            content = self._fetch_url_content(url)
+        if url:
+            return self._import_from_url(url, context)
+        elif content:
+            return self._import_from_markdown(content, filename or "manual", context)
+        else:
+            return SkillResult.fail("Either url or content must be provided")
 
-            if not content:
-                console.print("[red]Could not fetch job posting from URL[/red]")
-                return None
+    def _import_from_url(self, url: str, context: SkillContext) -> SkillResult:
+        """Import a job posting from a URL."""
+        # Fetch the URL
+        content = self._fetch_url_content(url)
+        if not content:
+            return SkillResult.fail("Could not fetch job posting from URL")
 
-            # Step 2: Parse with Claude
-            progress.update(task, description="Parsing job details...")
-            job = self._parse_job_posting(url, content)
-
-            if not job:
-                console.print("[red]Could not parse job posting[/red]")
-                return None
+        # Parse with Claude
+        job = self._parse_job_posting(url, content, context)
+        if not job:
+            return SkillResult.fail("Could not parse job posting")
 
         # Add ID, URL, and source tracking
         company_name = job.get("company") or "unknown"
@@ -98,37 +106,22 @@ class JobImporter(BaseAgent):
         job["imported_at"] = datetime.now(timezone.utc).isoformat()
         job["company"] = company_name
 
-        # Save to data store
-        self.data_store.save_job(job)
+        result = JobPostingResult(
+            job=job,
+            source_url=url,
+            source_file=None,
+        )
 
-        # Print summary
-        self._print_job_summary(job)
+        return SkillResult.ok(result)
 
-        return job
-
-    def import_from_markdown(self, content: str, filename: str) -> dict | None:
-        """Import a job posting from markdown content.
-
-        Args:
-            content: The markdown/text content of the job description.
-            filename: The source filename (for reference).
-
-        Returns:
-            The imported job dictionary, or None if parsing failed.
-        """
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task(f"Parsing {filename}...", total=None)
-
-            # Parse with Claude
-            job = self._parse_job_posting(f"manual import from {filename}", content)
-
-            if not job:
-                console.print(f"[red]Could not parse job from {filename}[/red]")
-                return None
+    def _import_from_markdown(
+        self, content: str, filename: str, context: SkillContext
+    ) -> SkillResult:
+        """Import a job posting from markdown content."""
+        # Parse with Claude
+        job = self._parse_job_posting(f"manual import from {filename}", content, context)
+        if not job:
+            return SkillResult.fail(f"Could not parse job from {filename}")
 
         # Add ID and source tracking
         company_name = job.get("company") or "unknown"
@@ -140,23 +133,16 @@ class JobImporter(BaseAgent):
         job["source_file"] = filename
         job["company"] = company_name
 
-        # Save to data store
-        self.data_store.save_job(job)
+        result = JobPostingResult(
+            job=job,
+            source_url=None,
+            source_file=filename,
+        )
 
-        # Print summary
-        self._print_job_summary(job)
-
-        return job
+        return SkillResult.ok(result)
 
     def _fetch_url_content(self, url: str) -> str | None:
-        """Fetch content from a URL.
-
-        Args:
-            url: URL to fetch.
-
-        Returns:
-            Page content as string, or None if fetch failed.
-        """
+        """Fetch content from a URL."""
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -165,44 +151,37 @@ class JobImporter(BaseAgent):
                 response = client.get(url)
                 if response.status_code == 200:
                     return response.text
-                else:
-                    console.print(f"[red]HTTP {response.status_code} fetching URL[/red]")
-        except Exception as e:
-            console.print(f"[red]Error fetching URL: {e}[/red]")
+        except Exception:
+            pass
         return None
 
-    def _parse_job_posting(self, url: str, content: str) -> dict | None:
-        """Parse job posting content with Claude.
-
-        Args:
-            url: Source URL (for context in prompt).
-            content: Page content to parse.
-
-        Returns:
-            Parsed job dictionary, or None if parsing failed.
-        """
+    def _parse_job_posting(
+        self, source: str, content: str, context: SkillContext
+    ) -> dict | None:
+        """Parse job posting content with Claude."""
         # Truncate content if too long
         if len(content) > 50000:
             content = content[:50000] + "\n... [truncated]"
 
         # Build system prompt with learned preferences for scoring
-        system_prompt = self._get_url_parse_prompt() + self._build_learned_context("job_scoring")
+        system_prompt = self._get_url_parse_prompt()
+        if context.learned_context:
+            system_prompt += context.learned_context
 
         try:
             job = self.client.complete_json(
                 system=system_prompt,
-                user=f"Parse this job posting from {url}:\n\n{content}",
+                user=f"Parse this job posting from {source}:\n\n{content}",
                 max_tokens=2048,
             )
 
-            # Validate and correct location_type using our classifier
+            # Validate and correct location_type using classifier
             if job:
                 job_location = job.get("location", "")
                 job["location_type"] = classify_job_location(job_location, self.config)
 
             return job
-        except ValueError as e:
-            console.print(f"[red]Error parsing job: {e}[/red]")
+        except ValueError:
             return None
 
     def _get_url_parse_prompt(self) -> str:
@@ -251,35 +230,8 @@ class JobImporter(BaseAgent):
         return "\n".join(rules)
 
     def _slugify(self, name: str) -> str:
-        """Convert a name to a slug.
-
-        Args:
-            name: Name to slugify.
-
-        Returns:
-            Lowercase, hyphenated slug.
-        """
+        """Convert a name to a slug."""
         slug = name.lower()
         slug = re.sub(r"[^a-z0-9]+", "-", slug)
         slug = slug.strip("-")
         return slug
-
-    def _print_job_summary(self, job: dict) -> None:
-        """Print summary of imported job."""
-        company = job.get("company", "Unknown")
-        title = job.get("title", "Unknown")
-        location = job.get("location", "Unknown")
-        location_type = job.get("location_type", "remote")
-        score = job.get("match_score", "?")
-        requirements = job.get("requirements_summary", "Not specified")
-
-        console.print(
-            Panel(
-                f"[bold]{title}[/bold] at [cyan]{company}[/cyan]\n"
-                f"[dim]Location: {location} ({location_type})[/dim]\n"
-                f"[dim]Match Score: {score}/100[/dim]\n\n"
-                f"[bold]Requirements:[/bold]\n{requirements}\n\n"
-                f"[dim]ID: {job['id']}[/dim]",
-                title="Job Imported",
-            )
-        )

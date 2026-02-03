@@ -15,7 +15,11 @@ from config_loader import (
     is_remote_enabled,
 )
 from data_store import DataStore
-from agents import CompanyScoutAgent, CompanyResearcherAgent, LearningAgent, JobResearcherAgent
+from agents import (
+    CandidateProfilerAgent,
+    OpportunityScoutAgent,
+    ApplicationComposerAgent,
+)
 
 console = Console()
 IMPORT_DIR = Path(__file__).parent / "import-jobs"
@@ -25,13 +29,18 @@ HELP_TEXT = """
 Talent Scout - AI-powered job search automation
 
 WORKFLOW:
-  1. Scout companies    → scout companies --location "Palo Alto, CA"
-  2. Research & import  → scout research "Company" or scout research <url>
-  3. Review jobs        → scout jobs
-  4. Learn preferences  → scout learn (after importing/deleting jobs)
-  5. Analyze fit        → scout analyze <job_id>
-  6. Generate resume    → scout resume <job_id>
-  7. Generate cover     → scout cover-letter <job_id>
+  1. Set up profile       → scout profile --refresh
+  2. Scout companies      → scout companies --location "Palo Alto, CA"
+  3. Research & import    → scout research "Company" or scout research <url>
+  4. Review jobs          → scout jobs
+  5. Learn preferences    → scout learn (after importing/deleting jobs)
+  6. Analyze fit          → scout analyze <job_id>
+  7. Generate resume      → scout resume <job_id>
+  8. Generate cover       → scout cover-letter <job_id>
+
+PROFILE:
+  profile         View/manage your candidate profile
+  profile --refresh  Re-parse profile from base resume
 
 DISCOVERY:
   companies     Scout target companies by location (from config.json)
@@ -52,6 +61,7 @@ APPLICATION:
   cover-letter-gen Regenerate PDF from edited cover letter markdown
 
 EXAMPLES:
+  scout profile --refresh
   scout companies --location "Palo Alto, CA" --count 10
   scout research "Google"
   scout research https://jobs.example.com/posting/12345
@@ -70,6 +80,42 @@ def cli(ctx):
     ctx.ensure_object(dict)
     ctx.obj["config"] = load_config()
     ctx.obj["data_store"] = DataStore(ctx.obj["config"])
+
+
+# ============================================================================
+# Profile Commands
+# ============================================================================
+
+
+@cli.command()
+@click.option(
+    "--refresh",
+    is_flag=True,
+    help="Re-parse profile from base resume.",
+)
+@click.pass_context
+def profile(ctx, refresh: bool):
+    """View or refresh your candidate profile.
+
+    The profile is extracted from your base resume and includes
+    learned preferences from job feedback.
+    """
+    config = ctx.obj["config"]
+    agent = CandidateProfilerAgent(config)
+
+    if refresh:
+        console.print("\n[bold blue]Refreshing profile from base resume...[/bold blue]\n")
+        result = agent.refresh_profile()
+        if not result:
+            console.print("[red]Profile refresh failed[/red]")
+    else:
+        console.print("\n[bold blue]Candidate Profile[/bold blue]\n")
+        agent.view_profile()
+
+
+# ============================================================================
+# Discovery Commands
+# ============================================================================
 
 
 @cli.command()
@@ -123,11 +169,11 @@ def companies(ctx, location: str, count: int | None):
                     console.print("[dim]Remote is also enabled.[/dim]")
                 return
 
-    agent = CompanyScoutAgent(config)
+    agent = OpportunityScoutAgent(config)
 
     for loc in locations_to_scout:
         console.print(f"\n[bold blue]Scouting companies for: {loc}[/bold blue]")
-        results = agent.scout(location=loc, count=count)
+        results = agent.scout_companies(location=loc, count=count)
         console.print(f"[green]Found {len(results)} companies for {loc}[/green]")
 
 
@@ -142,7 +188,7 @@ def research(ctx, target: str):
     - A job posting URL (e.g., "https://...") to import a specific job
     """
     config = ctx.obj["config"]
-    agent = CompanyResearcherAgent(config)
+    agent = OpportunityScoutAgent(config)
 
     # Detect if target is a URL
     if target.startswith("http://") or target.startswith("https://"):
@@ -156,7 +202,7 @@ def research(ctx, target: str):
     else:
         # Treat as company name
         console.print(f"\n[bold blue]Researching: {target}[/bold blue]")
-        result = agent.research(target)
+        result = agent.research_company(target)
 
         jobs_count = len(result.get("jobs", []))
         console.print(f"\n[green]Research complete. Found {jobs_count} potential job(s).[/green]")
@@ -191,7 +237,7 @@ def import_jobs(ctx):
 
     console.print(f"\n[bold blue]Found {len(md_files)} file(s) to import[/bold blue]\n")
 
-    agent = CompanyResearcherAgent(config)
+    agent = OpportunityScoutAgent(config)
     imported = 0
     failed = 0
 
@@ -287,6 +333,11 @@ def jobs(ctx, location: str, company: str | None):
     console.print(table)
 
 
+# ============================================================================
+# Feedback Loop Commands
+# ============================================================================
+
+
 @cli.command()
 @click.pass_context
 def learn(ctx):
@@ -299,8 +350,8 @@ def learn(ctx):
     config = ctx.obj["config"]
     console.print("\n[bold blue]Learning from job feedback...[/bold blue]\n")
 
-    agent = LearningAgent(config)
-    result = agent.analyze_and_learn()
+    agent = OpportunityScoutAgent(config)
+    result = agent.learn_from_feedback()
 
     if result:
         console.print("\n[dim]Run 'scout companies' or 'scout research' to use improved targeting.[/dim]")
@@ -318,7 +369,7 @@ def delete(ctx, job_id: str, reason: str | None):
     """
     config = ctx.obj["config"]
     data_store = ctx.obj["data_store"]
-    agent = LearningAgent(config)
+    agent = OpportunityScoutAgent(config)
 
     # Find and remove the job using DataStore
     job = data_store.delete_job(job_id)
@@ -333,6 +384,11 @@ def delete(ctx, job_id: str, reason: str | None):
 
     console.print(f"[green]Removed:[/green] {job.get('title')} at {job.get('company')}")
     console.print(f"[dim]This feedback will improve future targeting. Run 'scout learn' to update.[/dim]")
+
+
+# ============================================================================
+# Application Commands
+# ============================================================================
 
 
 @cli.command()
@@ -356,7 +412,7 @@ def analyze(ctx, job_id: str):
     config = ctx.obj["config"]
     console.print(f"\n[bold blue]Analyzing job: {job_id}[/bold blue]\n")
 
-    agent = JobResearcherAgent(config)
+    agent = ApplicationComposerAgent(config)
     result = agent.analyze_job(job_id)
 
     if not result:
@@ -375,7 +431,7 @@ def resume(ctx, job_id: str):
     config = ctx.obj["config"]
     console.print(f"\n[bold blue]Generating resume for: {job_id}[/bold blue]\n")
 
-    agent = JobResearcherAgent(config)
+    agent = ApplicationComposerAgent(config)
     result = agent.generate_resume(job_id)
 
     if not result:
@@ -394,7 +450,7 @@ def cover_letter(ctx, job_id: str):
     config = ctx.obj["config"]
     console.print(f"\n[bold blue]Generating cover letter for: {job_id}[/bold blue]\n")
 
-    agent = JobResearcherAgent(config)
+    agent = ApplicationComposerAgent(config)
     result = agent.generate_cover_letter(job_id)
 
     if not result:
@@ -411,7 +467,7 @@ def resume_gen(ctx, job_id: str):
     to regenerate just the PDF without re-running AI generation.
     """
     config = ctx.obj["config"]
-    agent = JobResearcherAgent(config)
+    agent = ApplicationComposerAgent(config)
 
     # Find the markdown file
     md_path = agent.find_document_by_job_id(job_id, "resume")
@@ -439,7 +495,7 @@ def cover_letter_gen(ctx, job_id: str):
     to regenerate just the PDF without re-running AI generation.
     """
     config = ctx.obj["config"]
-    agent = JobResearcherAgent(config)
+    agent = ApplicationComposerAgent(config)
 
     # Find the markdown file
     md_path = agent.find_document_by_job_id(job_id, "cover-letter")
@@ -469,7 +525,7 @@ def resume_improve(ctx, job_id: str):
     config = ctx.obj["config"]
     console.print(f"\n[bold blue]Improving resume for: {job_id}[/bold blue]\n")
 
-    agent = JobResearcherAgent(config)
+    agent = ApplicationComposerAgent(config)
     result = agent.improve_resume(job_id)
 
     if not result:

@@ -1,14 +1,11 @@
-"""Company Researcher Agent - deep research on companies and job discovery."""
+"""Company Researcher Skill - researches company details and discovers jobs."""
 
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from dataclasses import dataclass
 
 import httpx
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from config_loader import (
     get_locations,
@@ -17,11 +14,8 @@ from config_loader import (
     is_remote_enabled,
     classify_job_location,
 )
-from data_store import DataStore
-from .base_agent import BaseAgent
-from .job_importer import JobImporter
+from .base_skill import BaseSkill, SkillContext, SkillResult
 
-console = Console()
 
 RESEARCH_SYSTEM_PROMPT = """You are a company research analyst helping with a job search. Your task is to provide comprehensive research on a specific company.
 
@@ -95,100 +89,81 @@ For location_type, use one of these values based on the job's location:
 Be realistic - only include jobs you have reasonable confidence exist or are likely to exist based on company size and typical hiring patterns."""
 
 
-class CompanyResearcherAgent(BaseAgent):
-    """Agent that researches companies and discovers job openings."""
+@dataclass
+class CompanyResearchResult:
+    """Result of company research."""
 
-    def __init__(self, config: dict):
-        """Initialize the company researcher agent.
+    company_info: dict
+    """Company information dictionary."""
+
+    jobs: list[dict]
+    """List of discovered job dictionaries."""
+
+    careers_page: str | None
+    """URL to company careers page."""
+
+    search_notes: str | None
+    """Notes about the job search."""
+
+
+class CompanyResearcherSkill(BaseSkill):
+    """Skill that researches companies and discovers job openings."""
+
+    def execute(
+        self,
+        context: SkillContext,
+        company_name: str,
+    ) -> SkillResult:
+        """Research a company and find job openings.
 
         Args:
-            config: Configuration dictionary.
-        """
-        super().__init__(config)
-        self.data_store = DataStore(config)
-        self.job_importer = JobImporter(config)
+            context: Execution context with config and learned preferences.
+            company_name: Name of the company to research.
 
-    def research(self, company_name: str) -> dict:
-        """Research a company and find job openings.
+        Returns:
+            SkillResult with CompanyResearchResult data.
+        """
+        # Step 1: Research the company
+        company_info = self._research_company(company_name)
+        if not company_info:
+            return SkillResult.fail("Failed to research company")
+
+        # Step 2: Find jobs at the company
+        jobs_data = self._find_jobs(company_name, company_info, context)
+
+        # Step 3: Try to verify careers page accessibility
+        careers_data = self._check_careers_page(jobs_data.get("careers_page"))
+
+        # Process jobs - add IDs, validate locations
+        jobs = self._process_jobs(jobs_data.get("jobs", []), company_name)
+
+        result = CompanyResearchResult(
+            company_info=company_info,
+            jobs=jobs,
+            careers_page=jobs_data.get("careers_page"),
+            search_notes=jobs_data.get("notes"),
+        )
+
+        return SkillResult.ok(
+            result,
+            careers_accessible=careers_data.get("status") == "accessible" if careers_data else False,
+        )
+
+    def research_company_only(self, company_name: str) -> SkillResult:
+        """Research only company details without job search.
 
         Args:
             company_name: Name of the company to research.
 
         Returns:
-            Dictionary with company info, jobs, and metadata.
+            SkillResult with company info dictionary.
         """
-        slug = self._slugify(company_name)
+        company_info = self._research_company(company_name)
+        if not company_info:
+            return SkillResult.fail("Failed to research company")
+        return SkillResult.ok(company_info)
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            # Step 1: Company research
-            task = progress.add_task(f"Researching {company_name}...", total=None)
-            company_info = self._research_company(company_name)
-
-            # Step 2: Job search
-            progress.update(task, description=f"Finding jobs at {company_name}...")
-            jobs_info = self._find_jobs(company_name, company_info)
-
-            # Step 3: Try to fetch careers page
-            progress.update(task, description="Checking careers page...")
-            careers_data = self._fetch_careers_page(jobs_info.get("careers_page"))
-
-        # Combine results
-        result = {
-            "company": company_info,
-            "jobs": jobs_info.get("jobs", []),
-            "careers_page": jobs_info.get("careers_page"),
-            "search_notes": jobs_info.get("notes"),
-            "researched_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        # Save research
-        self.data_store.save_research(slug, result)
-        console.print(f"[dim]Saved research to data/research/{slug}.json[/dim]")
-
-        # Add jobs to location files
-        jobs = jobs_info.get("jobs", [])
-        if jobs:
-            added = self.data_store.save_jobs(jobs, company_name)
-            if added > 0:
-                console.print(f"[dim]Added {added} job(s) to data files[/dim]")
-
-        # Print summary
-        self._print_summary(company_info, jobs)
-
-        return result
-
-    def import_job_from_url(self, url: str) -> dict | None:
-        """Import a job posting from a URL.
-
-        Delegates to JobImporter.
-
-        Args:
-            url: URL of the job posting.
-
-        Returns:
-            The imported job dictionary, or None if import failed.
-        """
-        return self.job_importer.import_from_url(url)
-
-    def import_job_from_markdown(self, content: str, filename: str) -> dict | None:
-        """Import a job posting from markdown content.
-
-        Delegates to JobImporter.
-
-        Args:
-            content: The markdown/text content of the job description.
-            filename: The source filename (for reference).
-
-        Returns:
-            The imported job dictionary, or None if parsing failed.
-        """
-        return self.job_importer.import_from_markdown(content, filename)
-
-    def _research_company(self, company_name: str) -> dict:
+    def _research_company(self, company_name: str) -> dict | None:
         """Get detailed company research from Claude."""
         try:
             return self.client.complete_json(
@@ -196,16 +171,14 @@ class CompanyResearcherAgent(BaseAgent):
                 user=f"Research this company: {company_name}\n\nProvide comprehensive information for a job seeker targeting Engineering Manager and Technical Product Manager roles.",
                 max_tokens=4096,
             )
-        except ValueError as e:
-            console.print(f"[red]Error researching company: {e}[/red]")
-            return {}
+        except ValueError:
+            return None
 
-    def _find_jobs(self, company_name: str, company_info: dict) -> dict:
+    def _find_jobs(
+        self, company_name: str, company_info: dict, context: SkillContext
+    ) -> dict:
         """Find job openings at the company."""
-        context = json.dumps(company_info, indent=2) if company_info else "No additional context"
-
-        # Build enhanced prompt with learned preferences
-        learned_context = self._build_learned_context("job_search")
+        company_context = json.dumps(company_info, indent=2) if company_info else "No additional context"
 
         # Build location priorities from config
         locations = get_locations(self.config)
@@ -224,15 +197,18 @@ class CompanyResearcherAgent(BaseAgent):
             else "Engineering Manager, Director, and Technical Product Manager"
         )
 
-        system_prompt = self._get_job_search_prompt() + learned_context
+        # Build system prompt with learned preferences
+        system_prompt = self._get_job_search_prompt()
+        if context.learned_context:
+            system_prompt += context.learned_context
 
         try:
-            jobs_data = self.client.complete_json(
+            return self.client.complete_json(
                 system=system_prompt,
                 user=f"""Find job openings at {company_name}.
 
 Company context:
-{context}
+{company_context}
 
 Target locations (in priority order):
 {location_text}
@@ -240,21 +216,8 @@ Target locations (in priority order):
 Find relevant {roles_text} roles.""",
                 max_tokens=4096,
             )
-        except ValueError as e:
-            console.print(f"[red]Error finding jobs: {e}[/red]")
-            jobs_data = {"jobs": []}
-
-        # Add unique IDs and source to jobs, and validate/correct location_type
-        for job in jobs_data.get("jobs", []):
-            job["id"] = f"JOB-{self._slugify(company_name).upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
-            job["company"] = company_name
-            job["source"] = "discovered"
-
-            # Validate and correct location_type using our classifier
-            job_location = job.get("location", "")
-            job["location_type"] = classify_job_location(job_location, self.config)
-
-        return jobs_data
+        except ValueError:
+            return {"jobs": []}
 
     def _get_job_search_prompt(self) -> str:
         """Build the job search system prompt with config-based locations."""
@@ -301,8 +264,24 @@ Find relevant {roles_text} roles.""",
 
         return "\n".join(rules)
 
-    def _fetch_careers_page(self, url: str | None) -> dict | None:
-        """Attempt to fetch and analyze a careers page."""
+    def _process_jobs(self, jobs: list[dict], company_name: str) -> list[dict]:
+        """Add IDs and validate location_type for jobs."""
+        company_slug = self._slugify(company_name)
+
+        for job in jobs:
+            # Add unique ID
+            job["id"] = f"JOB-{company_slug.upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
+            job["company"] = company_name
+            job["source"] = "discovered"
+
+            # Validate and correct location_type using classifier
+            job_location = job.get("location", "")
+            job["location_type"] = classify_job_location(job_location, self.config)
+
+        return jobs
+
+    def _check_careers_page(self, url: str | None) -> dict | None:
+        """Check if careers page is accessible."""
         if not url:
             return None
 
@@ -315,8 +294,8 @@ Find relevant {roles_text} roles.""",
                         "status": "accessible",
                         "content_length": len(response.text),
                     }
-        except Exception as e:
-            console.print(f"[dim]Could not fetch careers page: {e}[/dim]")
+        except Exception:
+            pass
 
         return {"url": url, "status": "not_accessible"}
 
@@ -326,36 +305,3 @@ Find relevant {roles_text} roles.""",
         slug = re.sub(r"[^a-z0-9]+", "-", slug)
         slug = slug.strip("-")
         return slug
-
-    def _print_summary(self, company_info: dict, jobs: list[dict]) -> None:
-        """Print research summary."""
-        if company_info:
-            name = company_info.get("company_name", "Unknown")
-            desc = company_info.get("description", "No description")
-            industry = company_info.get("industry", "Unknown")
-            employees = company_info.get("employee_count", "Unknown")
-            public = "Public" if company_info.get("public") else "Private"
-
-            console.print(
-                Panel(
-                    f"[bold]{name}[/bold] ({public})\n"
-                    f"[dim]{industry} - ~{employees} employees[/dim]\n\n"
-                    f"{desc}",
-                    title="Company Overview",
-                )
-            )
-
-        if jobs:
-            console.print(f"\n[bold]Found {len(jobs)} relevant job(s):[/bold]")
-            for job in jobs[:5]:
-                score = job.get("match_score", "?")
-                loc = job.get("location", "Unknown")
-                console.print(
-                    f"  - {job['title']} [dim]({loc}, score: {score})[/dim]"
-                )
-                console.print(f"    [dim]ID: {job['id']}[/dim]")
-
-            if len(jobs) > 5:
-                console.print(f"  [dim]... and {len(jobs) - 5} more[/dim]")
-        else:
-            console.print("\n[yellow]No matching jobs found[/yellow]")

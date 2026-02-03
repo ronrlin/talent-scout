@@ -432,6 +432,34 @@ class DataStore:
             json.dump(preferences, f, indent=2)
 
     # =========================================================================
+    # Candidate Profile
+    # =========================================================================
+
+    def get_profile(self) -> dict | None:
+        """Get candidate profile.
+
+        Returns:
+            Profile dictionary or None if not found.
+        """
+        profile_file = self.data_dir / "candidate-profile.json"
+
+        if not profile_file.exists():
+            return None
+
+        with open(profile_file) as f:
+            return json.load(f)
+
+    def save_profile(self, profile: dict) -> None:
+        """Save candidate profile.
+
+        Args:
+            profile: Profile dictionary to save.
+        """
+        profile_file = self.data_dir / "candidate-profile.json"
+        with open(profile_file, "w") as f:
+            json.dump(profile, f, indent=2)
+
+    # =========================================================================
     # Internal Methods
     # =========================================================================
 
