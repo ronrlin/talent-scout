@@ -191,7 +191,11 @@ class ApplicationComposerAgent(BaseAgent):
         return str(md_path)
 
     def improve_resume(self, job_id: str) -> str | None:
-        """Iteratively improve an existing resume to better align with a job.
+        """Improve an existing resume using three-phase pipeline.
+
+        Phase 1: Generate edit plan (3-8 surgical edits) using analysis data
+        Phase 2: Apply edits programmatically to preserve format
+        Phase 3: Credibility audit on changed lines only
 
         Args:
             job_id: ID of the job the resume is for.
@@ -222,54 +226,184 @@ class ApplicationComposerAgent(BaseAgent):
             console.print("[red]Could not load base resume[/red]")
             return None
 
+        # Load analysis — auto-run analyze if missing
+        analysis = self._load_analysis(job_id)
+        if not analysis:
+            console.print("[yellow]No analysis found. Running analyze first...[/yellow]\n")
+            analysis_result = self.analyze_job(job_id)
+            if analysis_result:
+                analysis = analysis_result
+            else:
+                console.print("[yellow]Analysis failed — proceeding with degraded improvement[/yellow]\n")
+
+        # Determine role lens
+        role_lens = self.job_analyzer.determine_role_lens(job)
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
-            task = progress.add_task("Analyzing and improving resume...", total=None)
+            # Phase 1: Generate edit plan
+            task = progress.add_task("Phase 1: Generating edit plan...", total=None)
 
-            # Build skill context
             context = SkillContext(config=self.config)
 
-            # Execute resume improvement
-            result = self.resume_generator.improve_resume(
+            edit_plan_result = self.resume_generator.plan_resume_edits(
                 context,
                 job=job,
                 current_resume=current_resume,
                 base_resume=base_resume,
+                analysis=analysis,
+                role_lens=role_lens,
             )
 
-            if not result.success:
-                console.print(f"[red]Resume improvement failed: {result.error}[/red]")
+            if not edit_plan_result.success:
+                console.print(f"[red]Edit plan generation failed: {edit_plan_result.error}[/red]")
                 return None
 
-            improved_resume = result.data.resume_markdown
-            improvement_summary = result.data.improvement_summary
+            edit_plan = edit_plan_result.data
+
+            # Save versioned edit plan to disk
+            edit_plan_path = self._save_edit_plan(job_id, edit_plan)
+
+            # Phase 2: Apply edits programmatically
+            progress.update(task, description="Phase 2: Applying edits...")
+
+            apply_result = self.resume_generator.apply_resume_edits(
+                current_resume, edit_plan
+            )
+
+            if not apply_result.success:
+                console.print(f"[red]Edit application failed: {apply_result.error}[/red]")
+                return None
+
+            modified_resume = apply_result.data["resume"]
+            apply_report = apply_result.data["report"]
+
+            # Phase 3: Credibility audit
+            progress.update(task, description="Phase 3: Credibility audit...")
+
+            audit_result = self.resume_generator.audit_resume_edits(
+                context,
+                modified_resume=modified_resume,
+                original_resume=current_resume,
+                base_resume=base_resume,
+                job=job,
+                edit_plan=edit_plan,
+            )
+
+            if audit_result.success:
+                final_resume = audit_result.data["resume"]
+                audit_report = audit_result.data["report"]
+            else:
+                # Audit failed — use the Phase 2 output as-is
+                console.print(f"[yellow]Credibility audit failed, using Phase 2 output: {audit_result.error}[/yellow]")
+                final_resume = modified_resume
+                audit_report = []
 
             progress.update(task, description="Saving improved resume...")
 
             # Save the improved resume
             with open(resume_path, "w") as f:
-                f.write(improved_resume)
+                f.write(final_resume)
 
             progress.update(task, description="Generating PDF...")
 
             # Regenerate PDF
             pdf_path = self._convert_to_pdf(resume_path, "resume")
 
-        # Print improvement summary
-        console.print(Panel(
-            "\n".join(f"- {item}" for item in improvement_summary),
-            title="[bold green]Improvement Summary[/bold green]",
-            border_style="green"
-        ))
+        # Print edit plan summary
+        self._print_edit_summary(edit_plan, apply_report, audit_report)
 
         console.print(f"\n[green]Resume improved and saved to:[/green] {resume_path}")
+        if edit_plan_path:
+            console.print(f"[dim]Edit plan saved to:[/dim] {edit_plan_path}")
         if pdf_path:
             console.print(f"[green]PDF saved to:[/green] {pdf_path}")
 
         return str(resume_path)
+
+    def _save_edit_plan(self, job_id: str, edit_plan: dict) -> Path | None:
+        """Save versioned edit plan to disk.
+
+        Finds the next version number and saves as {job-id}-edit-plan-v{N}.json.
+        """
+        analysis_dir = self.output_dir / "analysis"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find next version number
+        version = 1
+        while (analysis_dir / f"{job_id}-edit-plan-v{version}.json").exists():
+            version += 1
+
+        edit_plan_path = analysis_dir / f"{job_id}-edit-plan-v{version}.json"
+
+        data = {
+            "job_id": job_id,
+            "version": version,
+            "edit_plan": edit_plan,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        with open(edit_plan_path, "w") as f:
+            json.dump(data, f, indent=2)
+
+        return edit_plan_path
+
+    def _print_edit_summary(
+        self, edit_plan: dict, apply_report: list[dict], audit_report: list[dict]
+    ) -> None:
+        """Print structured edit summary using Rich panels."""
+        edits = edit_plan.get("edit_plan", [])
+
+        if not edits:
+            console.print("[yellow]No edits were proposed.[/yellow]")
+            return
+
+        # Edit plan summary
+        edit_lines = []
+        for i, edit in enumerate(edits, 1):
+            edit_type = edit.get("edit_type", "replace")
+            target = edit.get("target", "unknown")
+            rationale = edit.get("rationale", "")
+            edit_lines.append(f"[bold]{i}. [{edit_type.upper()}][/bold] {target}")
+            edit_lines.append(f"   [dim]{rationale}[/dim]")
+
+        console.print(Panel(
+            "\n".join(edit_lines),
+            title=f"[bold green]Edit Plan ({len(edits)} edits)[/bold green]",
+            border_style="green",
+        ))
+
+        # Apply report — show any failures
+        failed = [r for r in apply_report if not r.get("applied")]
+        if failed:
+            fail_lines = [f"- {r.get('target', '?')}: {r.get('reason', 'unknown')}" for r in failed]
+            console.print(Panel(
+                "\n".join(fail_lines),
+                title="[bold yellow]Edits That Needed Fallback[/bold yellow]",
+                border_style="yellow",
+            ))
+
+        # Audit report — show any credibility flags
+        if audit_report:
+            audit_lines = [f"- {item}" for item in audit_report]
+            console.print(Panel(
+                "\n".join(audit_lines),
+                title="[bold cyan]Credibility Audit[/bold cyan]",
+                border_style="cyan",
+            ))
+
+        # Remaining gaps
+        remaining_gaps = edit_plan.get("remaining_gaps", [])
+        if remaining_gaps:
+            gap_lines = [f"- {gap}" for gap in remaining_gaps]
+            console.print(Panel(
+                "\n".join(gap_lines),
+                title="[dim]Remaining Gaps (cannot address without fabrication)[/dim]",
+                border_style="dim",
+            ))
 
     # =========================================================================
     # Cover Letter Generation
@@ -542,6 +676,23 @@ class ApplicationComposerAgent(BaseAgent):
             console.print("\n[bold yellow]Potential Gaps:[/bold yellow]")
             for g in gaps[:3]:
                 console.print(f"  - {g}")
+
+        # Domain connections
+        domain_connections = match.get("domain_connections", [])
+        if domain_connections:
+            dc_lines = []
+            for dc in domain_connections:
+                conn_type = dc.get("connection_type", "unknown").replace("_", " ").title()
+                dc_lines.append(
+                    f"[bold]{dc.get('candidate_experience', '?')}[/bold]\n"
+                    f"  → {dc.get('target_domain', '?')} [dim]({conn_type})[/dim]\n"
+                    f"  [italic]{dc.get('reasoning', '')}[/italic]"
+                )
+            console.print(Panel(
+                "\n\n".join(dc_lines),
+                title="[bold magenta]Domain Connections[/bold magenta]",
+                border_style="magenta",
+            ))
 
         # Keywords to include
         keywords = recs.get("keywords_to_include", [])
