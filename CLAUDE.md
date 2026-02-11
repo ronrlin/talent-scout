@@ -11,7 +11,7 @@ Talent Scout is a Python CLI tool for job search automation. It uses Claude API 
 - Python 3.11+ with CLI subcommands (`scout <command>`)
 - Claude API (Anthropic) for AI capabilities
 - JSON files for data storage
-- Markdown to PDF for resume/cover letter generation
+- Markdown for base resume and generated documents; WeasyPrint for PDF, python-docx for DOCX generation
 
 ## Development Setup
 
@@ -36,11 +36,12 @@ python scout.py companies --location "Palo Alto, CA"
 scout companies [--location "City, State"|remote|all] [--count 15]
 scout research <company_name>
 scout analyze <job_id>
-scout resume <job_id>
-scout resume-improve <job_id>
-scout resume-gen <job_id>
-scout cover-letter <job_id>
-scout cover-letter-gen <job_id>
+scout resume <job_id> [--format pdf|docx|both]
+scout resume-improve <job_id> [--format pdf|docx|both]
+scout resume-gen <job_id> [--format pdf|docx|both]
+scout cover-letter <job_id> [--format pdf|docx|both]
+scout cover-letter-gen <job_id> [--format pdf|docx|both]
+scout interview-prep <job_id>
 ```
 
 ## Location Configuration
@@ -54,12 +55,24 @@ Locations are configured in `config.json` using "City, State" format. The system
 }
 ```
 
+## Output Format Configuration
+
+Output format for resumes and cover letters defaults to `preferences.output_format` in `config.json`. Override per-command with `--format`.
+
+```json
+"preferences": {
+  "output_format": "both"
+}
+```
+
+Options: `"pdf"` (default), `"docx"`, `"both"` (generates PDF + DOCX).
+
 ## Directory Structure
 
 - `agents/` - Agent implementations (company_scout, company_researcher, etc.)
 - `input/` - User inputs (base resume, target/excluded company lists)
 - `data/` - Generated data (companies, jobs, research, connections)
-- `output/` - Final outputs (resumes, cover letters, outreach emails)
+- `output/` - Final outputs (resumes, cover letters, interview prep, outreach emails)
 
 ## Key Files
 

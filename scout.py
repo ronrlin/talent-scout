@@ -37,6 +37,7 @@ WORKFLOW:
   6. Analyze fit          → scout analyze <job_id>
   7. Generate resume      → scout resume <job_id>
   8. Generate cover       → scout cover-letter <job_id>
+  9. Prepare for interview → scout interview-prep <job_id>
 
 PROFILE:
   profile         View/manage your candidate profile
@@ -57,8 +58,16 @@ APPLICATION:
   resume           Generate a customized resume for a specific job
   cover-letter     Generate a tailored cover letter
   resume-improve   Iteratively improve resume for better job alignment
-  resume-gen       Regenerate PDF from edited resume markdown
-  cover-letter-gen Regenerate PDF from edited cover letter markdown
+  resume-gen       Regenerate output from edited resume markdown
+  cover-letter-gen Regenerate output from edited cover letter markdown
+  interview-prep   Generate screening interview talking points
+
+  All output commands support --format pdf|docx|both (default from config).
+
+CORPUS:
+  corpus build   Build experience bullet corpus from existing resumes
+  corpus update  Update corpus with new bullets from recent resumes
+  corpus stats   Show corpus statistics
 
 EXAMPLES:
   scout profile --refresh
@@ -70,6 +79,8 @@ EXAMPLES:
   scout analyze JOB-MODMED-ABC
   scout resume JOB-MODMED-ABC
   scout resume-improve JOB-MODMED-ABC
+  scout interview-prep JOB-MODMED-ABC
+  scout corpus build
 """
 
 
@@ -421,18 +432,25 @@ def analyze(ctx, job_id: str):
 
 @cli.command()
 @click.argument("job_id")
+@click.option(
+    "--format", "output_format",
+    type=click.Choice(["pdf", "docx", "both"]),
+    default=None,
+    help="Output format (default: from config, or pdf).",
+)
 @click.pass_context
-def resume(ctx, job_id: str):
+def resume(ctx, job_id: str, output_format: str | None):
     """Generate a customized resume for a job.
 
     Creates a tailored resume based on your base resume,
     optimized for the specific job posting.
     """
     config = ctx.obj["config"]
+    output_format = output_format or config.get("preferences", {}).get("output_format", "pdf")
     console.print(f"\n[bold blue]Generating resume for: {job_id}[/bold blue]\n")
 
     agent = ApplicationComposerAgent(config)
-    result = agent.generate_resume(job_id)
+    result = agent.generate_resume(job_id, output_format=output_format)
 
     if not result:
         console.print("[red]Resume generation failed[/red]")
@@ -440,18 +458,25 @@ def resume(ctx, job_id: str):
 
 @cli.command("cover-letter")
 @click.argument("job_id")
+@click.option(
+    "--format", "output_format",
+    type=click.Choice(["pdf", "docx", "both"]),
+    default=None,
+    help="Output format (default: from config, or pdf).",
+)
 @click.pass_context
-def cover_letter(ctx, job_id: str):
+def cover_letter(ctx, job_id: str, output_format: str | None):
     """Generate a cover letter for a job.
 
     Creates a personalized cover letter based on the job
     requirements and your experience.
     """
     config = ctx.obj["config"]
+    output_format = output_format or config.get("preferences", {}).get("output_format", "pdf")
     console.print(f"\n[bold blue]Generating cover letter for: {job_id}[/bold blue]\n")
 
     agent = ApplicationComposerAgent(config)
-    result = agent.generate_cover_letter(job_id)
+    result = agent.generate_cover_letter(job_id, output_format=output_format)
 
     if not result:
         console.print("[red]Cover letter generation failed[/red]")
@@ -459,14 +484,21 @@ def cover_letter(ctx, job_id: str):
 
 @cli.command("resume-gen")
 @click.argument("job_id")
+@click.option(
+    "--format", "output_format",
+    type=click.Choice(["pdf", "docx", "both"]),
+    default=None,
+    help="Output format (default: from config, or pdf).",
+)
 @click.pass_context
-def resume_gen(ctx, job_id: str):
-    """Regenerate PDF from existing resume markdown.
+def resume_gen(ctx, job_id: str, output_format: str | None):
+    """Regenerate output from existing resume markdown.
 
     Use this after manually editing a resume markdown file
-    to regenerate just the PDF without re-running AI generation.
+    to regenerate PDF/DOCX without re-running AI generation.
     """
     config = ctx.obj["config"]
+    output_format = output_format or config.get("preferences", {}).get("output_format", "pdf")
     agent = ApplicationComposerAgent(config)
 
     # Find the markdown file
@@ -476,25 +508,35 @@ def resume_gen(ctx, job_id: str):
         console.print("[dim]Run 'scout resume <job_id>' first to generate the resume.[/dim]")
         return
 
-    console.print(f"\n[bold blue]Regenerating PDF from: {md_path.name}[/bold blue]\n")
+    fmt_label = "PDF + DOCX" if output_format == "both" else output_format.upper()
+    console.print(f"\n[bold blue]Regenerating {fmt_label} from: {md_path.name}[/bold blue]\n")
 
-    pdf_path = agent.regenerate_pdf(md_path, "resume")
-    if pdf_path:
-        console.print(f"[green]PDF saved to:[/green] {pdf_path}")
+    results = agent.regenerate_output(md_path, "resume", output_format)
+    generated = {fmt: path for fmt, path in results.items() if path}
+    if generated:
+        for fmt, path in generated.items():
+            console.print(f"[green]{fmt.upper()} saved to:[/green] {path}")
     else:
-        console.print("[red]PDF generation failed[/red]")
+        console.print("[red]Output generation failed[/red]")
 
 
 @cli.command("cover-letter-gen")
 @click.argument("job_id")
+@click.option(
+    "--format", "output_format",
+    type=click.Choice(["pdf", "docx", "both"]),
+    default=None,
+    help="Output format (default: from config, or pdf).",
+)
 @click.pass_context
-def cover_letter_gen(ctx, job_id: str):
-    """Regenerate PDF from existing cover letter markdown.
+def cover_letter_gen(ctx, job_id: str, output_format: str | None):
+    """Regenerate output from existing cover letter markdown.
 
     Use this after manually editing a cover letter markdown file
-    to regenerate just the PDF without re-running AI generation.
+    to regenerate PDF/DOCX without re-running AI generation.
     """
     config = ctx.obj["config"]
+    output_format = output_format or config.get("preferences", {}).get("output_format", "pdf")
     agent = ApplicationComposerAgent(config)
 
     # Find the markdown file
@@ -504,32 +546,62 @@ def cover_letter_gen(ctx, job_id: str):
         console.print("[dim]Run 'scout cover-letter <job_id>' first to generate the cover letter.[/dim]")
         return
 
-    console.print(f"\n[bold blue]Regenerating PDF from: {md_path.name}[/bold blue]\n")
+    fmt_label = "PDF + DOCX" if output_format == "both" else output_format.upper()
+    console.print(f"\n[bold blue]Regenerating {fmt_label} from: {md_path.name}[/bold blue]\n")
 
-    pdf_path = agent.regenerate_pdf(md_path, "cover-letter")
-    if pdf_path:
-        console.print(f"[green]PDF saved to:[/green] {pdf_path}")
+    results = agent.regenerate_output(md_path, "cover-letter", output_format)
+    generated = {fmt: path for fmt, path in results.items() if path}
+    if generated:
+        for fmt, path in generated.items():
+            console.print(f"[green]{fmt.upper()} saved to:[/green] {path}")
     else:
-        console.print("[red]PDF generation failed[/red]")
+        console.print("[red]Output generation failed[/red]")
 
 
 @cli.command("resume-improve")
 @click.argument("job_id")
+@click.option(
+    "--format", "output_format",
+    type=click.Choice(["pdf", "docx", "both"]),
+    default=None,
+    help="Output format (default: from config, or pdf).",
+)
 @click.pass_context
-def resume_improve(ctx, job_id: str):
+def resume_improve(ctx, job_id: str, output_format: str | None):
     """Iteratively improve a resume for better job alignment.
 
     Reviews an existing resume against the job description and
     makes targeted improvements while maintaining credibility.
     """
     config = ctx.obj["config"]
+    output_format = output_format or config.get("preferences", {}).get("output_format", "pdf")
     console.print(f"\n[bold blue]Improving resume for: {job_id}[/bold blue]\n")
 
     agent = ApplicationComposerAgent(config)
-    result = agent.improve_resume(job_id)
+    result = agent.improve_resume(job_id, output_format=output_format)
 
     if not result:
         console.print("[red]Resume improvement failed[/red]")
+
+
+@cli.command("interview-prep")
+@click.argument("job_id")
+@click.pass_context
+def interview_prep(ctx, job_id: str):
+    """Generate screening interview talking points for a job.
+
+    Creates a preparation document with elevator pitch, domain
+    connection talking points, anticipated Q&A, and gap mitigation
+    strategies tailored to the specific role.
+    """
+    config = ctx.obj["config"]
+    console.print(f"\n[bold blue]Generating interview prep for: {job_id}[/bold blue]\n")
+
+    agent = ApplicationComposerAgent(config)
+    result = agent.generate_interview_prep(job_id)
+
+    if not result:
+        console.print("[red]Interview prep generation failed[/red]")
 
 
 @cli.command()
@@ -540,6 +612,140 @@ def outreach(ctx, company_name: str, connection: str | None):
     """Generate cold outreach email for a company."""
     console.print(f"[yellow]Outreach generator not yet implemented[/yellow]")
     console.print(f"Would generate outreach for: {company_name}")
+
+
+# ============================================================================
+# Corpus Commands
+# ============================================================================
+
+
+@cli.group()
+def corpus():
+    """Manage the experience bullet corpus.
+
+    The corpus is a library of proven experience bullets extracted from
+    generated resumes. It provides consistent language and faster generation
+    by allowing Claude to select and adapt existing bullets rather than
+    creating new ones from scratch.
+    """
+    pass
+
+
+@corpus.command("build")
+@click.pass_context
+def corpus_build(ctx):
+    """Build the experience bullet corpus from existing resumes.
+
+    Scans all generated resumes in output/resumes/ and extracts
+    experience bullets, deduplicating similar entries and enriching
+    with skills and themes for better matching.
+    """
+    from claude_client import ClaudeClient
+    from skills import CorpusBuilderSkill
+
+    config = ctx.obj["config"]
+    data_store = ctx.obj["data_store"]
+
+    console.print("\n[bold blue]Building experience bullet corpus...[/bold blue]\n")
+
+    client = ClaudeClient()
+    skill = CorpusBuilderSkill(client, data_store, config)
+
+    result = skill.build_corpus()
+
+    if result.success:
+        console.print("[green]Corpus built successfully![/green]\n")
+        console.print(f"  Resumes processed: {result.metadata.get('resumes_processed', 0)}")
+        console.print(f"  Experience entries: {result.metadata.get('experiences_count', 0)}")
+        console.print(f"  Total bullets: {result.metadata.get('bullets_count', 0)}")
+        console.print(f"  Skills indexed: {result.metadata.get('skills_indexed', 0)}")
+        console.print(f"  Themes indexed: {result.metadata.get('themes_indexed', 0)}")
+        console.print("\n[dim]Corpus saved to data/skills-corpus.json[/dim]")
+    else:
+        console.print(f"[red]Corpus build failed: {result.error}[/red]")
+
+
+@corpus.command("update")
+@click.pass_context
+def corpus_update(ctx):
+    """Update corpus with new bullets from recent resumes.
+
+    Compares current resumes to the existing corpus and adds any
+    new bullet formulations discovered during recent resume generation.
+    """
+    from claude_client import ClaudeClient
+    from skills import CorpusBuilderSkill
+
+    config = ctx.obj["config"]
+    data_store = ctx.obj["data_store"]
+
+    console.print("\n[bold blue]Updating experience bullet corpus...[/bold blue]\n")
+
+    client = ClaudeClient()
+    skill = CorpusBuilderSkill(client, data_store, config)
+
+    result = skill.update_corpus()
+
+    if result.success:
+        console.print("[green]Corpus updated successfully![/green]\n")
+        console.print(f"  Resumes processed: {result.metadata.get('resumes_processed', 0)}")
+        console.print(f"  Experience entries: {result.metadata.get('experiences_count', 0)}")
+        console.print(f"  Total bullets: {result.metadata.get('bullets_count', 0)}")
+    else:
+        console.print(f"[red]Corpus update failed: {result.error}[/red]")
+
+
+@corpus.command("stats")
+@click.pass_context
+def corpus_stats(ctx):
+    """Show corpus statistics."""
+    data_store = ctx.obj["data_store"]
+
+    corpus_data = data_store.get_corpus()
+
+    if not corpus_data:
+        console.print("[yellow]No corpus found. Run 'scout corpus build' first.[/yellow]")
+        return
+
+    console.print("\n[bold blue]Skills Corpus Statistics[/bold blue]\n")
+    console.print(f"  Version: {corpus_data.get('version', 'unknown')}")
+    console.print(f"  Generated: {corpus_data.get('generated_at', 'unknown')}")
+    console.print(f"  Source resumes: {corpus_data.get('source_resumes', 0)}")
+
+    experiences = corpus_data.get("experiences", {})
+    total_bullets = sum(
+        len(exp.get("bullets", []))
+        for exp in experiences.values()
+    )
+
+    console.print(f"  Experience entries: {len(experiences)}")
+    console.print(f"  Total bullets: {total_bullets}")
+    console.print(f"  Skills indexed: {len(corpus_data.get('skills_index', {}))}")
+    console.print(f"  Themes indexed: {len(corpus_data.get('themes_index', {}))}")
+
+    # Show top skills
+    skills_index = corpus_data.get("skills_index", {})
+    if skills_index:
+        sorted_skills = sorted(
+            skills_index.items(),
+            key=lambda x: len(x[1]),
+            reverse=True
+        )[:10]
+        console.print("\n[bold]Top 10 Skills:[/bold]")
+        for skill, bullet_ids in sorted_skills:
+            console.print(f"  {skill}: {len(bullet_ids)} bullets")
+
+    # Show top themes
+    themes_index = corpus_data.get("themes_index", {})
+    if themes_index:
+        sorted_themes = sorted(
+            themes_index.items(),
+            key=lambda x: len(x[1]),
+            reverse=True
+        )[:10]
+        console.print("\n[bold]Top 10 Themes:[/bold]")
+        for theme, bullet_ids in sorted_themes:
+            console.print(f"  {theme}: {len(bullet_ids)} bullets")
 
 
 if __name__ == "__main__":

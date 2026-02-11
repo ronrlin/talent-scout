@@ -2,7 +2,7 @@
   "user": {
     "name": "Ron Lin",
     "linkedin_url": "www.linkedin.com/in/ronlin",
-    "base_resume_path": "./input/base-resume.docx",
+    "base_resume_path": "./input/base-resume.md",
     "email": "ronrlin@gmail.com"
   },
   "preferences": {
@@ -37,7 +37,8 @@
     ],
     "min_company_size": 100,
     "prefer_public_companies": true,
-    "companies_per_location": 30
+    "companies_per_location": 30,
+    "output_format": "both"
   },
   "seeds": {
     "include": "./input/target-companies.json",
