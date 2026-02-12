@@ -5,7 +5,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from docx import Document
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -224,34 +223,15 @@ class CandidateProfilerAgent(BaseAgent):
         console.print(f"\n[dim]Profile generated: {generated}[/dim]")
 
     def _load_base_resume(self) -> str | None:
-        """Load the base resume from Word doc."""
-        resume_path = self.input_dir / "base-resume.docx"
+        """Load the base resume from markdown file."""
+        resume_path = self.input_dir / "base-resume.md"
 
         if not resume_path.exists():
             console.print(f"[yellow]Resume not found at {resume_path}[/yellow]")
             return None
 
         try:
-            doc = Document(resume_path)
-
-            # Extract text from paragraphs
-            text_parts = []
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    text_parts.append(para.text)
-
-            # Extract text from tables
-            for table in doc.tables:
-                for row in table.rows:
-                    row_text = []
-                    for cell in row.cells:
-                        if cell.text.strip():
-                            row_text.append(cell.text.strip())
-                    if row_text:
-                        text_parts.append(" | ".join(row_text))
-
-            return "\n\n".join(text_parts)
-
+            return resume_path.read_text()
         except Exception as e:
             console.print(f"[red]Error reading resume: {e}[/red]")
             return None

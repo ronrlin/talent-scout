@@ -5,6 +5,18 @@ from dataclasses import dataclass
 
 from .base_skill import BaseSkill, SkillContext, SkillResult
 
+# Constrained set of role archetypes. Used in analysis prompt and validated after.
+ROLE_ARCHETYPES = {
+    "org_leadership": "VP/Director/Head of Eng — org-wide strategy, budget, culture",
+    "team_leadership": "Engineering Manager — team building, delivery, people management",
+    "tech_lead": "Staff/Principal/Architect — technical direction, system design, IC with influence",
+    "product": "Product Manager/TPM — roadmap, stakeholder alignment, product outcomes",
+    "data": "Data/Analytics Engineering — pipelines, warehouses, BI, data platforms",
+    "ml": "ML/AI Engineering — model development, MLOps, applied AI systems",
+    "infra": "Platform/Infra/SRE — cloud, DevOps, reliability, infrastructure",
+    "ic": "Individual Contributor — hands-on software engineering, feature delivery",
+}
+
 
 JOB_ANALYSIS_PROMPT = """You are a senior job analysis and resume-optimization expert specializing in technical and technical-leadership roles across software engineering, data engineering, platform infrastructure, machine learning, applied AI, and product-oriented organizations.
 
@@ -45,6 +57,7 @@ CONSTRAINTS & RULES
 - Prefer clarity and credibility over exaggeration
 - Assume the resume will be evaluated by both ATS systems and senior humans
 - If a gap cannot be reasonably bridged, state that explicitly
+- Jobs that do not align with geographic preferences should be penalized in the overall score
 
 OUTPUT FORMAT (STRICT JSON)
 Return your analysis in the following structure:
@@ -53,7 +66,7 @@ Return your analysis in the following structure:
   "job_summary": {
     "title": "Job title",
     "company": "Company name",
-    "role_archetype": "org_leadership | team_leadership | tech_lead | IC | product | ML | data | infra",
+    "role_archetype": "EXACTLY one of: org_leadership | team_leadership | tech_lead | product | data | ml | infra | ic",
     "business_mission": "What this role ultimately exists to achieve",
     "key_responsibilities": ["Top 5 responsibilities"],
     "required_skills": ["Must-have skills"],
@@ -163,6 +176,15 @@ Provide a detailed match analysis and recommendations.""",
 
         if not analysis:
             return SkillResult.fail("Empty analysis result")
+
+        # Validate and normalize role_archetype to constrained set
+        job_summary = analysis.get("job_summary", {})
+        raw_archetype = job_summary.get("role_archetype", "").lower().strip()
+        if raw_archetype not in ROLE_ARCHETYPES:
+            # Default to team_leadership if Claude returned something unexpected
+            job_summary["role_archetype"] = "team_leadership"
+        else:
+            job_summary["role_archetype"] = raw_archetype
 
         result = JobAnalysisResult(
             job_summary=analysis.get("job_summary", {}),

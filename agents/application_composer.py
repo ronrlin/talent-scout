@@ -1,6 +1,7 @@
 """Application Composer Agent - positioning strategy, resume/cover letter generation."""
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,6 +150,14 @@ class ApplicationComposerAgent(BaseAgent):
         # Load analysis if exists
         analysis = self._load_analysis(job_id)
 
+        # Load additional context if enabled for resume generation (Approach A)
+        additional_context = None
+        ac_mode = os.environ.get("TALENT_SCOUT_ADDITIONAL_CONTEXT", "")
+        if ac_mode == "resume":
+            additional_context = self._load_additional_context()
+            if additional_context:
+                console.print("[dim]Using additional context for resume generation[/dim]")
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -166,6 +175,7 @@ class ApplicationComposerAgent(BaseAgent):
                 base_resume=resume_text,
                 analysis=analysis,
                 role_lens=role_lens,
+                additional_context=additional_context,
             )
 
             if not result.success:
@@ -245,6 +255,27 @@ class ApplicationComposerAgent(BaseAgent):
         # Determine role lens
         role_lens = self.job_analyzer.determine_role_lens(job)
 
+        # Extract positioning signals from analysis for Professional Summary guidance
+        positioning_strategy = None
+        role_archetype = None
+        if analysis:
+            resume_recs = analysis.get("resume_recommendations", {})
+            positioning_strategy = resume_recs.get("positioning_strategy")
+            job_summary = analysis.get("job_summary", {})
+            role_archetype = job_summary.get("role_archetype")
+
+        if not positioning_strategy and not role_archetype:
+            console.print("[yellow]Warning: No positioning signals available (role_archetype, positioning_strategy).[/yellow]")
+            console.print("[yellow]Professional Summary edits may default to base resume framing. Run 'scout analyze' first for best results.[/yellow]\n")
+
+        # Load additional context if enabled for resume-improve (Approach B)
+        additional_context = None
+        ac_mode = os.environ.get("TALENT_SCOUT_ADDITIONAL_CONTEXT", "")
+        if ac_mode == "improve":
+            additional_context = self._load_additional_context()
+            if additional_context:
+                console.print("[dim]Using additional context for resume improvement[/dim]")
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -262,6 +293,9 @@ class ApplicationComposerAgent(BaseAgent):
                 base_resume=base_resume,
                 analysis=analysis,
                 role_lens=role_lens,
+                positioning_strategy=positioning_strategy,
+                role_archetype=role_archetype,
+                additional_context=additional_context,
             )
 
             if not edit_plan_result.success:
@@ -297,6 +331,9 @@ class ApplicationComposerAgent(BaseAgent):
                 base_resume=base_resume,
                 job=job,
                 edit_plan=edit_plan,
+                positioning_strategy=positioning_strategy,
+                role_archetype=role_archetype,
+                additional_context=additional_context,
             )
 
             if audit_result.success:
@@ -709,6 +746,24 @@ class ApplicationComposerAgent(BaseAgent):
             return resume_path.read_text()
         except Exception as e:
             console.print(f"[red]Error reading resume: {e}[/red]")
+            return None
+
+    def _load_additional_context(self) -> str | None:
+        """Load additional context from input/additional_context.md.
+
+        Contains supplementary experience bullets (security governance, vendor
+        management, NERC CIP, team sizes, tech stacks, project details) that
+        are real but not on the base resume.
+
+        Returns:
+            Additional context text or None if file doesn't exist.
+        """
+        context_path = self.input_dir / "additional_context.md"
+        if not context_path.exists():
+            return None
+        try:
+            return context_path.read_text()
+        except Exception:
             return None
 
     def _save_analysis(self, job_id: str, job: dict, analysis: dict) -> None:

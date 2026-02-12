@@ -62,6 +62,39 @@ class DataStore:
 
         return None
 
+    def update_job(self, job_id: str, updates: dict) -> bool:
+        """Update fields on an existing job in-place.
+
+        Args:
+            job_id: The job ID to update.
+            updates: Dictionary of fields to set on the job.
+
+        Returns:
+            True if the job was found and updated, False otherwise.
+        """
+        self._ensure_index()
+
+        location_slug = self._job_index.get(job_id)
+        if not location_slug:
+            return False
+
+        jobs_file = self.data_dir / f"jobs-{location_slug}.json"
+        if not jobs_file.exists():
+            return False
+
+        with open(jobs_file) as f:
+            data = json.load(f)
+
+        for job in data.get("jobs", []):
+            if job.get("id") == job_id:
+                job.update(updates)
+                data["updated_at"] = datetime.now(timezone.utc).isoformat()
+                with open(jobs_file, "w") as f:
+                    json.dump(data, f, indent=2)
+                return True
+
+        return False
+
     def save_job(self, job: dict, location_slug: str | None = None) -> bool:
         """Save a job to the appropriate location file.
 
@@ -519,3 +552,31 @@ class DataStore:
     def invalidate_index(self) -> None:
         """Invalidate the job index, forcing rebuild on next lookup."""
         self._job_index = None
+
+    # =========================================================================
+    # Skills Corpus
+    # =========================================================================
+
+    def get_corpus(self) -> dict | None:
+        """Get the skills corpus.
+
+        Returns:
+            Corpus dictionary or None if not found.
+        """
+        corpus_file = self.data_dir / "skills-corpus.json"
+
+        if not corpus_file.exists():
+            return None
+
+        with open(corpus_file) as f:
+            return json.load(f)
+
+    def save_corpus(self, corpus: dict) -> None:
+        """Save the skills corpus.
+
+        Args:
+            corpus: Corpus dictionary to save.
+        """
+        corpus_file = self.data_dir / "skills-corpus.json"
+        with open(corpus_file, "w") as f:
+            json.dump(corpus, f, indent=2)

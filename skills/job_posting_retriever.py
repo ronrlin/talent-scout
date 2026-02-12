@@ -1,11 +1,24 @@
 """Job Posting Retriever Skill - fetches and parses job postings from URLs or markdown."""
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
+
+# Configure error logger to write to error.log in project root
+_error_logger = logging.getLogger("talent_scout.job_retriever")
+_error_logger.setLevel(logging.DEBUG)
+if not _error_logger.handlers:
+    _log_path = Path(__file__).resolve().parent.parent / "error.log"
+    _file_handler = logging.FileHandler(_log_path)
+    _file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    )
+    _error_logger.addHandler(_file_handler)
 
 from config_loader import (
     get_locations,
@@ -90,12 +103,21 @@ class JobPostingRetrieverSkill(BaseSkill):
         # Fetch the URL
         content = self._fetch_url_content(url)
         if not content:
-            return SkillResult.fail("Could not fetch job posting from URL")
+            msg = f"Could not fetch job posting from URL: {url} (see error.log for details)"
+            _error_logger.error("Job import failed at fetch stage for URL: %s", url)
+            return SkillResult.fail(msg)
 
         # Parse with Claude
         job = self._parse_job_posting(url, content, context)
         if not job:
-            return SkillResult.fail("Could not parse job posting")
+            msg = f"Could not parse job posting from URL: {url} (see error.log for details)"
+            _error_logger.error(
+                "Job import failed at parse stage for URL: %s — content length: %d, first 200 chars: %s",
+                url,
+                len(content),
+                content[:200],
+            )
+            return SkillResult.fail(msg)
 
         # Add ID, URL, and source tracking
         company_name = job.get("company") or "unknown"
@@ -151,8 +173,18 @@ class JobPostingRetrieverSkill(BaseSkill):
                 response = client.get(url)
                 if response.status_code == 200:
                     return response.text
-        except Exception:
-            pass
+                _error_logger.error(
+                    "HTTP %d fetching %s — response: %s",
+                    response.status_code,
+                    url,
+                    response.text[:500],
+                )
+        except httpx.TimeoutException as e:
+            _error_logger.error("Timeout fetching %s: %s", url, e)
+        except httpx.ConnectError as e:
+            _error_logger.error("Connection error fetching %s: %s", url, e)
+        except Exception as e:
+            _error_logger.error("Unexpected error fetching %s: %s: %s", url, type(e).__name__, e)
         return None
 
     def _parse_job_posting(
@@ -181,7 +213,10 @@ class JobPostingRetrieverSkill(BaseSkill):
                 job["location_type"] = classify_job_location(job_location, self.config)
 
             return job
-        except ValueError:
+        except ValueError as e:
+            _error_logger.error(
+                "Failed to parse Claude response for %s: %s", source, e
+            )
             return None
 
     def _get_url_parse_prompt(self) -> str:

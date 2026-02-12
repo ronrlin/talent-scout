@@ -9,13 +9,15 @@ from .base_skill import BaseSkill, SkillContext, SkillResult
 
 RESUME_GENERATION_PROMPT = """You are an expert resume writer. Create a customized resume tailored to a specific job posting.
 
+First, infer the primary role orientation (e.g., ML/AI systems, data infrastructure, product-oriented engineering leadership, org-scale people leadership). Use this to guide emphasis and omission throughout the resume.
+
 Guidelines:
-- Maintain truthfulness - only use information from the base resume
-- Reorder and emphasize relevant experience
+- Maintain truthfulness - only use information from the skill-corpus.json
+- Tailor the professional summary to the target role, emphasizing relevant skills and capturing the reader's attention
+- Reorder and emphasize relevant experiences
 - Incorporate keywords from the job posting naturally
 - Keep to 1-2 pages maximum
 - Use action verbs and quantified achievements
-- Tailor the professional summary to the target role
 
 Output the resume in clean Markdown format with clear sections:
 - Contact info header
@@ -55,7 +57,7 @@ Formatting:
 - Keep bullets concise but specific.
 - Output only the resume in Markdown.
 
-Do NOT invent experiences or skills not in the base resume. Only reorganize and reframe existing content."""
+Do NOT invent experiences or skills not in the base resume or additional context (if provided). Only reorganize and reframe existing content from these sources."""
 
 RESUME_DEFENSIBILITY_PROMPT = """You are a rigorous resume editor ensuring authenticity and defensibility.
 
@@ -88,6 +90,7 @@ Rules:
 - Keep all genuinely specific achievements, metrics, and examples
 - Check that the resume presents work history in chronological order
 - The candidate should be able to speak confidently to every single bullet point
+- When additional context is provided, claims sourced from it ARE real experiences and should NOT be flagged as fabrication
 - Output ONLY the revised resume in Markdown (no explanations)"""
 
 RESUME_EDIT_PLAN_PROMPT = """You are an expert resume strategist. Your task is to propose a SHORT LIST of surgical edits to an existing resume to improve its alignment with a specific job.
@@ -99,6 +102,7 @@ You will receive:
 2. The BASE RESUME (ground truth — all facts must trace back here)
 3. A JOB ANALYSIS with match assessment, gaps, and recommendations
 4. The ROLE LENS (engineering/product/program) indicating how to frame the resume
+5. Optionally, ADDITIONAL CONTEXT — supplementary experience bullets that are real but not on the base resume (security governance, vendor management, NERC CIP, team sizes, tech stacks, detailed project work). These are valid source material for edits.
 
 YOUR TASK:
 Propose 3-8 specific, high-impact edits. Each edit must be one of:
@@ -133,7 +137,7 @@ Anti-patterns to AVOID:
 
 CREDIBILITY GUARDRAILS — every edit must pass ALL four tests:
 1. INTERVIEW TEST: Could the candidate say this naturally in a 1:1 interview without sounding rehearsed?
-2. ORIGIN TEST: Every fact or claim must trace to a specific line in the base resume. New characterizations of existing facts are allowed; new facts are not.
+2. ORIGIN TEST: Every fact or claim must trace to a specific line in the base resume or the additional context (if provided). New characterizations of existing facts are allowed; new facts are not. When sourcing from additional context, cite it explicitly in source_evidence as "Additional context: [relevant line]".
 3. PROPORTION TEST: Total edits should change ≤15% of the resume content.
 4. VOICE TEST: The edit's language style should match the surrounding unchanged bullets in tone and specificity.
 
@@ -148,7 +152,7 @@ OUTPUT FORMAT — return valid JSON:
       "current_text": "The exact current text being replaced (must match the resume)",
       "proposed_text": "The new text to replace it with",
       "rationale": "Why this edit improves alignment with a specific job requirement",
-      "source_evidence": "The line from the base resume this is grounded in"
+      "source_evidence": "The line from the base resume or additional context this is grounded in"
     },
     {
       "edit_type": "add",
@@ -156,7 +160,7 @@ OUTPUT FORMAT — return valid JSON:
       "current_text": "",
       "proposed_text": "The new bullet text",
       "rationale": "Why this addition is material to addressing a gap",
-      "source_evidence": "The line from the base resume this is grounded in"
+      "source_evidence": "The line from the base resume or additional context this is grounded in (prefix with 'Additional context:' if from additional context)"
     },
     {
       "edit_type": "remove",
@@ -176,9 +180,15 @@ RESUME_EDIT_AUDIT_PROMPT = """You are a credibility auditor for resume edits. Yo
 
 Your job is to review ONLY THE CHANGED LINES for these issues:
 1. JD PARROTING: Does any edit contain phrases that too closely mirror the job description? If so, soften the language to use the candidate's natural voice from the base resume.
-2. CREDIBILITY: Can every claim in the edit be substantiated from the base resume? If not, flag it.
+2. CREDIBILITY: Can every claim in the edit be substantiated from the base resume or the additional context (if provided)? Additional context contains real experiences not on the base resume. If a claim traces to additional context, it IS credible. Only flag claims that cannot be traced to either source.
 3. VOICE MISMATCH: Does the edit sound noticeably different in tone from the surrounding unchanged bullets? If so, adjust to match.
-4. INFLATION: Does the edit overstate scope, impact, or responsibility compared to the base resume?
+4. INFLATION: Does the edit overstate scope, impact, or responsibility compared to the base resume or additional context?
+
+PROFESSIONAL SUMMARY EXCEPTION: The Professional Summary is a positioning statement, not a factual claim. Apply a DIFFERENT standard when auditing summary edits:
+- Reframing emphasis for the target role IS valid. Leading with "technology transformation executive" instead of "AI/ML leader" is not fabrication — it is emphasis selection for the role.
+- Check that the underlying experiences referenced in the summary ARE real (present in the base resume). But do NOT penalize reframing, re-ordering emphasis, or choosing different identity language than the base resume uses.
+- Do NOT soften or revert a summary edit simply because the base resume uses different emphasis words. The base resume's summary reflects one framing; the edit plan's summary reflects the framing best suited to the target role.
+- DO still flag JD parroting (verbatim phrases from the job description) in the summary.
 
 CRITICAL CONSTRAINT: You may ONLY modify the lines that were edited. Do NOT touch any other part of the resume.
 
@@ -235,6 +245,7 @@ class ResumeGeneratorSkill(BaseSkill):
         base_resume: str,
         analysis: dict | None = None,
         role_lens: str = "engineering",
+        additional_context: str | None = None,
     ) -> SkillResult:
         """Generate a customized resume for a job.
 
@@ -244,17 +255,22 @@ class ResumeGeneratorSkill(BaseSkill):
             base_resume: Base resume text.
             analysis: Optional analysis from JobDescriptionAnalyzerSkill.
             role_lens: Role lens for tailoring (engineering/product/program).
+            additional_context: Supplementary experience bullets (real but not on base resume).
 
         Returns:
             SkillResult with ResumeGenerationResult data.
         """
         # First pass: Generate resume
-        resume_md = self._generate_resume_content(job, base_resume, analysis, role_lens)
+        resume_md = self._generate_resume_content(
+            job, base_resume, analysis, role_lens, additional_context
+        )
         if not resume_md:
             return SkillResult.fail("Failed to generate resume content")
 
         # Second pass: Review for defensibility
-        resume_md = self._refine_resume_defensibility(resume_md, job, base_resume)
+        resume_md = self._refine_resume_defensibility(
+            resume_md, job, base_resume, additional_context
+        )
 
         result = ResumeGenerationResult(
             resume_markdown=resume_md,
@@ -271,6 +287,9 @@ class ResumeGeneratorSkill(BaseSkill):
         base_resume: str,
         analysis: dict | None = None,
         role_lens: str = "engineering",
+        positioning_strategy: str | None = None,
+        role_archetype: str | None = None,
+        additional_context: str | None = None,
     ) -> SkillResult:
         """Phase 1: Generate a structured edit plan for resume improvement.
 
@@ -281,6 +300,9 @@ class ResumeGeneratorSkill(BaseSkill):
             base_resume: Original base resume for reference.
             analysis: Analysis from scout analyze (match assessment, recommendations).
             role_lens: Role lens for strategic framing.
+            positioning_strategy: How to position the candidate for this role.
+            role_archetype: Role archetype from job analysis (e.g., org_leadership).
+            additional_context: Supplementary experience bullets (real but not on base resume).
 
         Returns:
             SkillResult with edit plan dict as data.
@@ -293,6 +315,28 @@ class ResumeGeneratorSkill(BaseSkill):
         if analysis:
             analysis_section = json.dumps(analysis, indent=2)
 
+        # Build positioning context for Professional Summary guidance
+        positioning_section = ""
+        if positioning_strategy or role_archetype:
+            positioning_section = "\n## POSITIONING GUIDANCE FOR PROFESSIONAL SUMMARY:\n"
+            if role_archetype:
+                positioning_section += f"Role archetype: {role_archetype}\n"
+            if positioning_strategy:
+                positioning_section += f"Positioning strategy: {positioning_strategy}\n"
+            positioning_section += "The Professional Summary should lead with the emphasis described above, NOT default to the base resume's framing. The summary is a positioning statement tailored to this role.\n"
+
+        # Build additional context section if provided
+        additional_context_section = ""
+        if additional_context:
+            additional_context_section = f"""
+## ADDITIONAL CONTEXT (supplementary real experiences — valid source material for edits):
+These are real experiences the candidate has but that are NOT on the base resume.
+They can be used as source material for "add" edits or to enrich "replace" edits.
+When using this material, cite it in source_evidence as "Additional context: [relevant line]".
+
+{additional_context}
+"""
+
         try:
             result = self.client.complete_json(
                 system=RESUME_EDIT_PLAN_PROMPT,
@@ -303,7 +347,7 @@ class ResumeGeneratorSkill(BaseSkill):
 
 ## ROLE LENS: {role_lens.upper()}
 {role_lens_guidance}
-
+{positioning_section}
 ## JOB ANALYSIS (match assessment, gaps, and recommendations):
 {analysis_section}
 
@@ -312,7 +356,7 @@ class ResumeGeneratorSkill(BaseSkill):
 
 ## BASE RESUME (ground truth — all facts must trace here):
 {base_resume}
-
+{additional_context_section}
 Propose 3-8 high-impact edits. Remember: most of the resume should remain unchanged.""",
                 max_tokens=4096,
             )
@@ -428,6 +472,9 @@ Propose 3-8 high-impact edits. Remember: most of the resume should remain unchan
         base_resume: str,
         job: dict,
         edit_plan: dict,
+        positioning_strategy: str | None = None,
+        role_archetype: str | None = None,
+        additional_context: str | None = None,
     ) -> SkillResult:
         """Phase 3: Credibility audit on changed lines only.
 
@@ -438,6 +485,9 @@ Propose 3-8 high-impact edits. Remember: most of the resume should remain unchan
             base_resume: Original base resume.
             job: Job dictionary.
             edit_plan: Edit plan from Phase 1.
+            positioning_strategy: How to position the candidate for this role.
+            role_archetype: Role archetype from job analysis (e.g., org_leadership).
+            additional_context: Supplementary experience bullets (real but not on base resume).
 
         Returns:
             SkillResult with {"resume": str, "report": list[str]}.
@@ -467,6 +517,26 @@ Propose 3-8 high-impact edits. Remember: most of the resume should remain unchan
                     f"  Removed: {edit.get('current_text', '')}"
                 )
 
+        # Build positioning context so auditor knows the intended summary direction
+        positioning_section = ""
+        if positioning_strategy or role_archetype:
+            positioning_section = "\n## POSITIONING GUIDANCE (for Professional Summary audit):\n"
+            if role_archetype:
+                positioning_section += f"Role archetype: {role_archetype}\n"
+            if positioning_strategy:
+                positioning_section += f"Intended positioning: {positioning_strategy}\n"
+            positioning_section += "Summary edits that align with this positioning should be passed, not softened back toward the base resume's framing.\n"
+
+        # Build additional context section if provided
+        additional_context_section = ""
+        if additional_context:
+            additional_context_section = f"""
+## ADDITIONAL CONTEXT (supplementary real experiences — also valid ground truth):
+Claims sourced from this material ARE credible and should pass the credibility check.
+
+{additional_context}
+"""
+
         try:
             result = self.client.complete_json(
                 system=RESUME_EDIT_AUDIT_PROMPT,
@@ -477,7 +547,7 @@ Propose 3-8 high-impact edits. Remember: most of the resume should remain unchan
 
 ## BASE RESUME (ground truth):
 {base_resume}
-
+{additional_context_section}{positioning_section}
 ## EDITS THAT WERE APPLIED:
 {chr(10).join(changes_summary)}
 
@@ -728,7 +798,12 @@ RESUME:
         return response if response else None
 
     def _generate_resume_content(
-        self, job: dict, resume_text: str, analysis: dict | None, role_lens: str
+        self,
+        job: dict,
+        resume_text: str,
+        analysis: dict | None,
+        role_lens: str,
+        additional_context: str | None = None,
     ) -> str | None:
         """Generate customized resume content."""
         job_text = json.dumps(job, indent=2)
@@ -748,6 +823,22 @@ RESUME:
 {corpus_context}
 """
 
+        # Build additional context section if provided
+        additional_context_section = ""
+        if additional_context:
+            additional_context_section = f"""
+## ADDITIONAL CONTEXT (supplementary real experiences — valid source material):
+These are real experiences the candidate has but that are NOT on the base resume.
+You may draw from this material to enrich the resume, especially to address gaps
+identified in the analysis. These experiences are factual and defensible.
+
+{additional_context}
+"""
+
+        source_instruction = "use only this information"
+        if additional_context:
+            source_instruction = "use this and additional context as source material"
+
         response = self.client.complete(
             system=RESUME_GENERATION_PROMPT,
             user=f"""Create a customized resume for this job:
@@ -758,9 +849,9 @@ RESUME:
 ## ROLE LENS: {role_lens.upper()}
 {role_lens_guidance}
 {corpus_section}
-## BASE RESUME (source material - use only this information):
+## BASE RESUME (primary source material - {source_instruction}):
 {resume_text}
-
+{additional_context_section}
 ## ANALYSIS & RECOMMENDATIONS:
 {analysis_text}
 
@@ -922,9 +1013,25 @@ Prefer adapting these over creating new content when they fit the job requiremen
 
         return unique_keywords
 
-    def _refine_resume_defensibility(self, resume: str, job: dict, base_resume: str) -> str:
+    def _refine_resume_defensibility(
+        self, resume: str, job: dict, base_resume: str, additional_context: str | None = None
+    ) -> str:
         """Second pass: review resume for defensibility and remove generic/inflated content."""
         job_text = json.dumps(job, indent=2)
+
+        # Build additional context section if provided
+        additional_context_section = ""
+        if additional_context:
+            additional_context_section = f"""
+## ADDITIONAL CONTEXT (supplementary real experiences — also valid ground truth):
+Claims sourced from this material ARE real and should NOT be flagged as fabrication.
+
+{additional_context}
+"""
+
+        ground_truth_instruction = "Ensure every claim is defensible and grounded in the original resume."
+        if additional_context:
+            ground_truth_instruction = "Ensure every claim is defensible and grounded in the original resume or additional context."
 
         return self.client.complete(
             system=RESUME_DEFENSIBILITY_PROMPT,
@@ -935,11 +1042,11 @@ Prefer adapting these over creating new content when they fit the job requiremen
 
 ## ORIGINAL BASE RESUME (ground truth - what the candidate actually did):
 {base_resume}
-
+{additional_context_section}
 ## TAILORED RESUME TO REVIEW:
 {resume}
 
-Ensure every claim is defensible and grounded in the original resume. Remove or tone down anything that sounds inflated or mirrors the job description too closely. Output only the refined resume in Markdown.""",
+{ground_truth_instruction} Remove or tone down anything that sounds inflated or mirrors the job description too closely. Output only the refined resume in Markdown.""",
             max_tokens=4096,
         )
 
