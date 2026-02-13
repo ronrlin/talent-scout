@@ -1,0 +1,12 @@
+.git
+__pycache__
+*.pyc
+.pytest_cache
+.coverage
+*.egg-info
+.env
+.venv
+venv
+node_modules
+design/
+*.docx

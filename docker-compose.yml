@@ -1,0 +1,14 @@
+services:
+  talent-scout:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./input:/app/input:ro
+      - ./data:/app/data
+      - ./output:/app/output
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - TALENT_SCOUT_API_KEY=${TALENT_SCOUT_API_KEY:-}
+    restart: unless-stopped

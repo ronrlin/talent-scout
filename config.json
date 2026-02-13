@@ -38,7 +38,12 @@
     "min_company_size": 100,
     "prefer_public_companies": true,
     "companies_per_location": 30,
-    "output_format": "both"
+    "output_format": "both",
+    "pipeline": {
+      "follow_up_days": 7,
+      "follow_up_reminder_days": [7, 14],
+      "auto_ghost_days": 30
+    }
   },
   "seeds": {
     "include": "./input/target-companies.json",

@@ -16,6 +16,7 @@ from config_loader import (
     is_remote_enabled,
 )
 from data_store import DataStore
+from pipeline_store import PipelineStore
 from skills import (
     CompanyResearcherSkill,
     JobPostingRetrieverSkill,
@@ -213,6 +214,7 @@ class OpportunityScoutAgent(BaseAgent):
         """
         super().__init__(config)
         self.data_store = DataStore(config)
+        self.pipeline = PipelineStore(config)
 
         # Initialize skills
         self.company_researcher = CompanyResearcherSkill(
@@ -423,6 +425,10 @@ Return exactly {count} companies as JSON. Prioritize quality and fit over quanti
             if added > 0:
                 console.print(f"[dim]Added {added} job(s) to data files[/dim]")
 
+            # Pipeline: create entries for discovered jobs (idempotent)
+            for job in jobs:
+                self.pipeline.create(job["id"], "auto:research")
+
         # Print summary
         self._print_research_summary(company_info, jobs)
 
@@ -501,6 +507,9 @@ Return exactly {count} companies as JSON. Prioritize quality and fit over quanti
             # Save to data store
             self.data_store.save_job(job)
 
+            # Pipeline: create entry for imported job
+            self.pipeline.create(job["id"], "auto:import_url")
+
         # Print summary
         self._print_job_summary(job)
 
@@ -544,6 +553,9 @@ Return exactly {count} companies as JSON. Prioritize quality and fit over quanti
 
             # Save to data store
             self.data_store.save_job(job)
+
+            # Pipeline: create entry for imported job
+            self.pipeline.create(job["id"], "auto:import_markdown")
 
         # Print summary
         self._print_job_summary(job)

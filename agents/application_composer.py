@@ -11,6 +11,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from data_store import DataStore
+from pipeline_store import PipelineStore
 from skills import (
     JobDescriptionAnalyzerSkill,
     ResumeGeneratorSkill,
@@ -42,6 +43,7 @@ class ApplicationComposerAgent(BaseAgent):
         """
         super().__init__(config)
         self.data_store = DataStore(config)
+        self.pipeline = PipelineStore(config)
 
         # Initialize skills
         self.job_analyzer = JobDescriptionAnalyzerSkill(
@@ -112,6 +114,11 @@ class ApplicationComposerAgent(BaseAgent):
 
             # Save analysis
             self._save_analysis(job_id, job, raw_analysis)
+
+            # Pipeline: advance to researched, record artifact
+            output_path = self.output_dir / "analysis" / f"{job_id}-analysis.json"
+            self.pipeline.advance(job_id, "researched", "auto:analyze")
+            self.pipeline.record_artifact(job_id, "analysis", str(output_path))
 
         # Print summary
         self._print_analysis(job, analysis_result)
@@ -193,6 +200,10 @@ class ApplicationComposerAgent(BaseAgent):
 
             with open(md_path, "w") as f:
                 f.write(resume_md)
+
+            # Pipeline: advance to resume_ready, record artifact
+            self.pipeline.advance(job_id, "resume_ready", "auto:resume")
+            self.pipeline.record_artifact(job_id, "resume", str(md_path))
 
             # Generate output format(s)
             fmt_label = "PDF + DOCX" if output_format == "both" else output_format.upper()
@@ -350,6 +361,10 @@ class ApplicationComposerAgent(BaseAgent):
             # Save the improved resume
             with open(resume_path, "w") as f:
                 f.write(final_resume)
+
+            # Pipeline: advance to resume_ready, record artifact
+            self.pipeline.advance(job_id, "resume_ready", "auto:resume_improve")
+            self.pipeline.record_artifact(job_id, "resume", str(resume_path))
 
             fmt_label = "PDF + DOCX" if output_format == "both" else output_format.upper()
             progress.update(task, description=f"Generating {fmt_label}...")
@@ -517,6 +532,9 @@ class ApplicationComposerAgent(BaseAgent):
             with open(md_path, "w") as f:
                 f.write(cover_letter_md)
 
+            # Pipeline: no advance, just record artifact
+            self.pipeline.record_artifact(job_id, "cover_letter", str(md_path))
+
             # Generate output format(s)
             fmt_label = "PDF + DOCX" if output_format == "both" else output_format.upper()
             progress.update(task, description=f"Generating {fmt_label}...")
@@ -613,6 +631,9 @@ class ApplicationComposerAgent(BaseAgent):
 
             with open(md_path, "w") as f:
                 f.write(prep_md)
+
+            # Pipeline: no advance, just record artifact
+            self.pipeline.record_artifact(job_id, "interview_prep", str(md_path))
 
         # Print summary
         self._print_interview_prep_summary(prep_result, md_path)

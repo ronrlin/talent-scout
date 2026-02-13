@@ -316,6 +316,145 @@ scout cover-letter JOB-MODMED-ABC123
 # Files are saved to output/resumes/ and output/cover-letters/
 ```
 
+## Running with Docker
+
+Docker provides a self-contained way to run the Talent Scout API server without installing Python dependencies or WeasyPrint libraries on your host machine.
+
+### Prerequisites
+
+- **Docker** and **Docker Compose** installed ([Get Docker](https://docs.docker.com/get-docker/))
+- **Anthropic API Key** set as an environment variable on your host
+
+### 1. Set Your API Key
+
+The container reads `ANTHROPIC_API_KEY` from your host environment. Export it before running Docker Compose:
+
+```bash
+export ANTHROPIC_API_KEY=your-api-key-here
+```
+
+Or create a `.env` file in the project root (Docker Compose loads it automatically):
+
+```bash
+echo "ANTHROPIC_API_KEY=your-api-key-here" > .env
+```
+
+### 2. Build and Start the Container
+
+```bash
+docker-compose up --build
+```
+
+On first startup you will see output like:
+
+```
+talent-scout-1  |
+talent-scout-1  |   API Key: aBcDeFgHiJkLmNoPqRsTuVwXyZ123456789-abc
+talent-scout-1  |   Docs:    http://localhost:8000/docs
+talent-scout-1  |
+talent-scout-1  | INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+**Copy the API Key** from the console output — you'll need it for all authenticated requests. The key is also persisted to `data/.api-key` so it stays the same across restarts.
+
+To run in the background (detached mode):
+
+```bash
+docker-compose up --build -d
+```
+
+When running detached, retrieve the API key from the file:
+
+```bash
+cat data/.api-key
+```
+
+### 3. Validate the API Is Running
+
+**Health check (no authentication required):**
+
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response:
+
+```json
+{"status":"ok"}
+```
+
+**List jobs (requires API key):**
+
+Replace `YOUR_API_KEY` with the key from step 2:
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" http://localhost:8000/api/v1/jobs
+```
+
+Expected response (empty if no jobs have been imported yet):
+
+```json
+[]
+```
+
+**View the pipeline dashboard:**
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" http://localhost:8000/api/v1/pipeline/next
+```
+
+**Import a job from a URL (async operation):**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/jobs/import/url \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://jobs.lever.co/company/job-id"}'
+```
+
+This returns a task ID since it calls the Claude API:
+
+```json
+{"task_id":"a1b2c3d4e5f6","status":"running"}
+```
+
+Poll for the result:
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" http://localhost:8000/api/v1/tasks/a1b2c3d4e5f6
+```
+
+### 4. Browse the Interactive API Docs
+
+Open [http://localhost:8000/docs](http://localhost:8000/docs) in your browser to see the full Swagger UI with all endpoints, request/response schemas, and a "Try it out" feature.
+
+### 5. Run CLI Commands via Docker
+
+You can also use the CLI inside the running container:
+
+```bash
+docker exec -it talent-scout-talent-scout-1 python scout.py jobs
+docker exec -it talent-scout-talent-scout-1 python scout.py pipeline
+docker exec -it talent-scout-talent-scout-1 python scout.py next
+```
+
+### 6. Stop the Container
+
+```bash
+docker-compose down
+```
+
+### Volume Mounts
+
+The `docker-compose.yml` mounts these directories so data persists across container restarts:
+
+| Host Path | Container Path | Mode | Purpose |
+|-----------|---------------|------|---------|
+| `./config.json` | `/app/config.json` | read-only | Your configuration |
+| `./input/` | `/app/input/` | read-only | Base resume, company lists |
+| `./data/` | `/app/data/` | read-write | Jobs, companies, pipeline state, API key |
+| `./output/` | `/app/output/` | read-write | Generated resumes, cover letters, analysis |
+
 ## Troubleshooting
 
 ### "ANTHROPIC_API_KEY environment variable not set"

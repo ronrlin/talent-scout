@@ -13,6 +13,7 @@ __pycache__/
 data/
 input/
 output/
+design/
 
 # Logs
 error.log

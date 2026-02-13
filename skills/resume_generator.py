@@ -93,88 +93,118 @@ Rules:
 - When additional context is provided, claims sourced from it ARE real experiences and should NOT be flagged as fabrication
 - Output ONLY the revised resume in Markdown (no explanations)"""
 
-RESUME_EDIT_PLAN_PROMPT = """You are an expert resume strategist. Your task is to propose a SHORT LIST of surgical edits to an existing resume to improve its alignment with a specific job.
+RESUME_EDIT_PLAN_PROMPT = """You are an expert executive-level resume strategist.
 
-You are NOT rewriting the resume. Most of the resume will remain unchanged. If a bullet is already good, leave it alone.
+Your task is to strategically optimize an existing tailored resume to maximize alignment with a specific job description — while preserving truthfulness, credibility, and factual grounding.
+
+You are not required to limit yourself to minor wording changes. You may propose surgical edits OR limited structural refinements when they materially improve positioning.
 
 You will receive:
-1. The CURRENT TAILORED RESUME (the document to edit)
-2. The BASE RESUME (ground truth — all facts must trace back here)
-3. A JOB ANALYSIS with match assessment, gaps, and recommendations
-4. The ROLE LENS (engineering/product/program) indicating how to frame the resume
-5. Optionally, ADDITIONAL CONTEXT — supplementary experience bullets that are real but not on the base resume (security governance, vendor management, NERC CIP, team sizes, tech stacks, detailed project work). These are valid source material for edits.
+1. CURRENT TAILORED RESUME
+2. BASE RESUME (ground truth — all claims must trace here)
+3. JOB ANALYSIS (match assessment, gaps, domain connections)
+4. ROLE LENS (engineering / product / program / executive)
+5. Optional ADDITIONAL CONTEXT (valid factual material not currently included)
 
-YOUR TASK:
-Propose 3-8 specific, high-impact edits. Each edit must be one of:
-- "replace": Change an existing bullet or the professional summary text
-- "add": Add a new bullet to a specific role (only when material to addressing a weakness)
-- "remove": Remove a bullet that is off-target or distracting
+------------------------------------------------------------
+OBJECTIVE
 
-STRATEGIC GUIDANCE:
-- Use edits strategically to shift the resume's focus through the role lens. For example, if the role lens is "product", edits should reframe engineering experience toward product outcomes.
-- If the role requires a more senior posture (e.g., "Director" vs "Manager"), edits should elevate language toward strategic scope, organizational impact, and executive communication.
-- Additions should only be used when existing bullets cannot be reframed to address a material gap.
-- The Professional Summary is a valid and high-impact edit target.
+Increase:
+- Perceived seniority alignment
+- Domain and problem-type relevance
+- Decision ownership clarity
+- System-level thinking and architectural depth
+- Executive communication posture
+- ATS keyword alignment (without copying JD phrases verbatim)
 
-DOMAIN CONNECTION STRATEGY:
-When the job analysis includes domain_connections, use them as the PRIMARY guide for choosing which bullets to edit and how to reframe them.
+------------------------------------------------------------
+ALLOWED EDIT TYPES
 
-Priority order for edits:
-1. REFRAME an existing bullet to surface a domain connection (best ROI — no new content needed)
-2. REFRAME the Professional Summary to emphasize domain-level parallels over generic management metrics
-3. ADD a new bullet only when no existing bullet can be reframed to surface the connection
+Each edit must be one of:
+- "replace"  (change existing bullet or summary text)
+- "add"      (add a new bullet grounded in base resume or additional context)
+- "remove"   (remove a distracting or low-leverage bullet)
+- "reorder"  (move a bullet within a role to improve emphasis)
 
-What makes a strong domain-connected edit:
-- Names the underlying problem type (optimization, resource allocation, demand forecasting, closed-loop control) rather than surface technologies
-- Connects the candidate's specific work to the target role's problem domain, not just the industry
-- Shows structural similarity: "Both involve assigning limited resources to spatiotemporally distributed demand under constraints"
+You may rewrite the Professional Summary entirely if high ROI.
 
-Anti-patterns to AVOID:
-- Emphasizing generic management metrics (team size scaling, headcount growth) over domain-relevant analytical depth
-- Surface skill matches ("both use data" or "both involve ML") instead of algorithmic or problem-type connections
-- Wasting edit slots on generic mentorship or leadership bullets when domain-differentiating edits are available
-- Choosing edits that any manager could claim instead of edits that highlight unique domain expertise
+You should avoid rewriting the entire resume unless necessary.
 
-CREDIBILITY GUARDRAILS — every edit must pass ALL four tests:
-1. INTERVIEW TEST: Could the candidate say this naturally in a 1:1 interview without sounding rehearsed?
-2. ORIGIN TEST: Every fact or claim must trace to a specific line in the base resume or the additional context (if provided). New characterizations of existing facts are allowed; new facts are not. When sourcing from additional context, cite it explicitly in source_evidence as "Additional context: [relevant line]".
-3. PROPORTION TEST: Total edits should change ≤15% of the resume content.
-4. VOICE TEST: The edit's language style should match the surrounding unchanged bullets in tone and specificity.
+------------------------------------------------------------
+STRATEGIC PRIORITIES (in order)
 
-ANTI-PARROTING RULE: Do NOT copy or closely paraphrase phrases from the job description. If the JD says "architect and deploy custom AI solutions for enterprise clients", your edit must NOT contain that phrase or a light rewording of it. Instead, describe what the candidate actually did using their own language from the base resume.
+1. LEVEL SIGNALING
+   - Does this read at the intended seniority?
+   - Is decision authority explicit?
+   - Is cross-functional or organizational impact clear?
 
+2. DOMAIN & PROBLEM ALIGNMENT
+   - Surface structural similarities to the target role’s core problems.
+   - Name underlying problem types (optimization, distributed systems, reliability engineering, resource allocation, governance, etc.).
+   - Semantic alignment to the JD is allowed, but do NOT copy or lightly paraphrase phrases directly from the JD.
+
+3. IMPACT CLARITY
+   - Replace generic execution phrasing with outcome-driven framing.
+   - Clarify scale, constraints, complexity, and tradeoffs.
+
+4. SIGNAL OPTIMIZATION
+   - Remove bullets that dilute positioning.
+   - Ensure the strongest, most relevant bullets appear earlier in each role.
+
+------------------------------------------------------------
+CREDIBILITY GUARDRAILS (all edits must pass)
+
+1. INTERVIEW TEST:
+   The candidate could explain this naturally in a live interview.
+
+2. ORIGIN TEST:
+   Every fact must trace to:
+   - The BASE RESUME, or
+   - ADDITIONAL CONTEXT (must be cited explicitly as "Additional context: ...")
+
+   You may improve characterization of real work, but may NOT fabricate new achievements.
+
+3. PROPORTION TEST:
+   Edits should generally modify no more than ~25% of total resume content unless absolutely necessary for level alignment.
+
+4. VOICE TEST:
+   Language must match the surrounding tone and specificity of the resume.
+
+------------------------------------------------------------
+ANTI-PARROTING RULE (REVISED)
+
+Do NOT copy or lightly rephrase sentences from the job description.
+
+However:
+- Using aligned terminology common to the domain is allowed.
+- ATS-aware vocabulary alignment is encouraged when grounded in real experience.
+
+------------------------------------------------------------
 OUTPUT FORMAT — return valid JSON:
+
 {
+  "strategic_summary": [
+    "3–5 bullets explaining the major positioning shifts being made"
+  ],
   "edit_plan": [
     {
-      "edit_type": "replace",
+      "edit_type": "replace" | "add" | "remove" | "reorder",
       "target": "Company Name, bullet N" or "Professional Summary",
-      "current_text": "The exact current text being replaced (must match the resume)",
-      "proposed_text": "The new text to replace it with",
-      "rationale": "Why this edit improves alignment with a specific job requirement",
-      "source_evidence": "The line from the base resume or additional context this is grounded in"
-    },
-    {
-      "edit_type": "add",
-      "target": "Company Name, after bullet N",
-      "current_text": "",
-      "proposed_text": "The new bullet text",
-      "rationale": "Why this addition is material to addressing a gap",
-      "source_evidence": "The line from the base resume or additional context this is grounded in (prefix with 'Additional context:' if from additional context)"
-    },
-    {
-      "edit_type": "remove",
-      "target": "Company Name, bullet N",
-      "current_text": "The exact text being removed",
-      "proposed_text": "",
-      "rationale": "Why this bullet is off-target or distracting for this role"
+      "current_text": "Exact current text (if applicable)",
+      "proposed_text": "Revised text or instruction",
+      "rationale": "Why this edit improves level, alignment, or positioning",
+      "source_evidence": "Line from BASE RESUME or 'Additional context: ...'"
     }
   ],
-  "unchanged_rationale": "Brief explanation of why the remaining bullets are already well-aligned and don't need changes",
+  "structural_recommendations": [
+    "Optional: suggested reordering, compression, or emphasis shifts"
+  ],
+  "unchanged_rationale": "Why the remaining bullets are already strong and aligned",
   "remaining_gaps": [
-    "Gap that cannot be addressed without fabricating experience"
+    "Gaps that cannot be addressed without fabrication"
   ]
-}"""
+}
+"""
 
 RESUME_EDIT_AUDIT_PROMPT = """You are a credibility auditor for resume edits. You will receive a list of specific edits that were just applied to a resume.
 
