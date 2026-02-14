@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # WeasyPrint system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -12,15 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python dependencies
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir -e .
-
 # Copy application code
 COPY . .
 
-# Create directories
-RUN mkdir -p data output input
+# Create directories and install
+RUN mkdir -p data output input && \
+    pip install --no-cache-dir .
 
 EXPOSE 8000
 
