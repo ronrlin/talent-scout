@@ -3,7 +3,7 @@
 import json
 from dataclasses import dataclass
 
-from .base_skill import BaseSkill, SkillContext, SkillResult, _load_reference
+from .base_skill import BaseSkill, SkillContext, SkillResult, _load_reference, _load_role_lens_guidance
 
 COVER_LETTER_PROMPT = _load_reference("cover-letter-prompt.md")
 COVER_LETTER_SPECIFICITY_PROMPT = _load_reference("cover-letter-specificity-prompt.md")
@@ -144,21 +144,6 @@ Output only the refined cover letter in Markdown.""",
 
     def _get_role_lens_guidance(self, role_lens: str) -> str:
         """Return role-lens specific guidance for cover letter generation."""
-        guidance = {
-            "engineering": """This is an ENGINEERING role. Frame experience around:
-- Systems you built or architected and their technical constraints
-- Engineering team leadership and scaling
-- Production operations and reliability outcomes
-- Technical decision-making and trade-offs""",
-            "product": """This is a PRODUCT role. Frame experience around:
-- Products you shaped and the customer/business outcomes
-- Strategic decisions about what to build and why
-- Working with engineering teams to deliver product value
-- Metrics, experimentation, and iteration""",
-            "program": """This is a PROGRAM role. Frame experience around:
-- Complex programs you drove to completion
-- Cross-functional coordination and stakeholder alignment
-- Process improvements and delivery outcomes
-- Risk identification and mitigation"""
-        }
-        return guidance.get(role_lens, guidance["engineering"])
+        guidance = _load_role_lens_guidance()
+        role = guidance.get(role_lens, guidance.get("engineering", {}))
+        return role.get("cover_letter", "")

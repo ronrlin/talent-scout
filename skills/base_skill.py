@@ -15,6 +15,54 @@ def _load_reference(filename: str) -> str:
     return (_REFERENCES_DIR / filename).read_text().strip()
 
 
+def _load_role_archetypes() -> dict[str, str]:
+    """Load role archetypes from reference file into {key: description} dict."""
+    text = _load_reference("role-archetypes.md")
+    archetypes = {}
+    for line in text.splitlines():
+        # Parse table rows: | `key` | Description |
+        if line.startswith("| `"):
+            parts = line.split("|")
+            key = parts[1].strip().strip("`")
+            desc = parts[2].strip()
+            archetypes[key] = desc
+    return archetypes
+
+
+def _load_role_lens_guidance() -> dict[str, dict[str, str]]:
+    """Load role-lens guidance from reference file into nested dict.
+
+    Returns:
+        {"engineering": {"resume": "...", "cover_letter": "..."}, ...}
+    """
+    text = _load_reference("role-lens-guidance.md")
+    guidance: dict[str, dict[str, str]] = {}
+    current_role = None
+    current_doc_type = None
+    current_lines: list[str] = []
+
+    def _flush():
+        if current_role and current_doc_type and current_lines:
+            guidance.setdefault(current_role, {})[current_doc_type] = "\n".join(current_lines).strip()
+
+    for line in text.splitlines():
+        if line.startswith("## ") and not line.startswith("###"):
+            _flush()
+            current_role = line[3:].strip().lower()
+            current_doc_type = None
+            current_lines = []
+        elif line.startswith("### "):
+            _flush()
+            raw = line[4:].strip().lower()
+            current_doc_type = "cover_letter" if raw == "cover letter" else raw
+            current_lines = []
+        elif current_doc_type is not None:
+            current_lines.append(line)
+
+    _flush()
+    return guidance
+
+
 @dataclass
 class SkillContext:
     """Context passed to skill execution.

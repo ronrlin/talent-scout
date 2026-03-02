@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from .base_skill import BaseSkill, SkillContext, SkillResult, _load_reference
+from .base_skill import BaseSkill, SkillContext, SkillResult, _load_reference, _load_role_lens_guidance
 
 RESUME_GENERATION_PROMPT = _load_reference("resume-generation-prompt.md")
 RESUME_DEFENSIBILITY_PROMPT = _load_reference("resume-defensibility-prompt.md")
@@ -851,36 +851,8 @@ Claims sourced from this material ARE real and should NOT be flagged as fabricat
 
     def _get_role_lens_guidance(self, role_lens: str, doc_type: str) -> str:
         """Return role-lens specific guidance for resume generation."""
-        guidance = {
-            "engineering": {
-                "resume": """This is an ENGINEERING role. Emphasize:
-- Technical systems architecture and ownership
-- Code, infrastructure, and platform decisions
-- Scaling engineering teams and establishing technical practices
-- Production reliability, observability, and operational excellence
-- AI/ML systems from experimentation to production deployment
-- Technical mentorship and growing engineers""",
-            },
-            "product": {
-                "resume": """This is a PRODUCT role. Emphasize:
-- Product strategy, vision, and roadmap ownership
-- Customer outcomes and business metrics
-- Cross-functional leadership with engineering, design, sales
-- Data-driven decision making and experimentation
-- Market analysis and competitive positioning
-- Prioritization frameworks and trade-off decisions""",
-            },
-            "program": {
-                "resume": """This is a PROGRAM role. Emphasize:
-- Cross-functional coordination and delivery execution
-- Stakeholder management across engineering, product, leadership
-- Process design, risk management, and dependency tracking
-- Program-level metrics, reporting, and visibility
-- Driving alignment and unblocking teams
-- Launch coordination and operational readiness""",
-            }
-        }
-        return guidance.get(role_lens, guidance["engineering"]).get(doc_type, "")
+        guidance = _load_role_lens_guidance()
+        return guidance.get(role_lens, guidance.get("engineering", {})).get(doc_type, "")
 
     def _build_job_context(self, job: dict) -> str:
         """Build a comprehensive job context string for prompts."""

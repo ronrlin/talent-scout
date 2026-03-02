@@ -1,7 +1,6 @@
 """Job Posting Retriever Skill - fetches and parses job postings from URLs or markdown."""
 
 import logging
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,11 +20,10 @@ if not _error_logger.handlers:
     _error_logger.addHandler(_file_handler)
 
 from config_loader import (
-    get_locations,
     get_location_slug,
-    get_location_description,
-    is_remote_enabled,
     classify_job_location,
+    build_target_roles_text,
+    build_location_type_rules,
 )
 from .base_skill import BaseSkill, SkillContext, SkillResult, _load_reference
 
@@ -97,7 +95,7 @@ class JobPostingRetrieverSkill(BaseSkill):
 
         # Add ID, URL, and source tracking
         company_name = job.get("company") or "unknown"
-        company_slug = self._slugify(company_name)
+        company_slug = get_location_slug(company_name)
         job["id"] = f"JOB-{company_slug.upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
         job["url"] = url
         job["source"] = "imported"
@@ -123,7 +121,7 @@ class JobPostingRetrieverSkill(BaseSkill):
 
         # Add ID and source tracking
         company_name = job.get("company") or "unknown"
-        company_slug = self._slugify(company_name)
+        company_slug = get_location_slug(company_name)
         job["id"] = f"JOB-{company_slug.upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
         job["url"] = None
         job["source"] = "imported"
@@ -198,51 +196,6 @@ class JobPostingRetrieverSkill(BaseSkill):
     def _get_url_parse_prompt(self) -> str:
         """Build the URL parse system prompt with config-based locations."""
         return JOB_URL_PARSE_PROMPT_TEMPLATE.format(
-            target_roles=self._build_target_roles_text(),
-            location_type_rules=self._build_location_type_rules(),
+            target_roles=build_target_roles_text(self.config),
+            location_type_rules=build_location_type_rules(self.config),
         )
-
-    def _build_target_roles_text(self) -> str:
-        """Build target roles text from config."""
-        target_roles = self.config.get("preferences", {}).get(
-            "target_roles",
-            [
-                "Engineering Manager",
-                "Software Manager",
-                "Technical Product Manager",
-                "Director of Analytics Engineering",
-            ],
-        )
-        return "\n".join(f"- {role}" for role in target_roles)
-
-    def _build_location_type_rules(self) -> str:
-        """Build location type rules from config for prompts."""
-        rules = []
-        locations = get_locations(self.config)
-
-        for location in locations:
-            slug = get_location_slug(location)
-            desc = get_location_description(location)
-            rules.append(f'- "{slug}" = {desc}')
-
-        if is_remote_enabled(self.config):
-            rules.append(
-                '- "remote" = Remote, distributed, work from anywhere, or hybrid with remote option'
-            )
-            rules.append(
-                '\nIf the location doesn\'t clearly match any configured location, default to "remote".'
-            )
-        elif locations:
-            default_slug = get_location_slug(locations[0])
-            rules.append(
-                f'\nIf the location doesn\'t clearly match any configured location, default to "{default_slug}".'
-            )
-
-        return "\n".join(rules)
-
-    def _slugify(self, name: str) -> str:
-        """Convert a name to a slug."""
-        slug = name.lower()
-        slug = re.sub(r"[^a-z0-9]+", "-", slug)
-        slug = slug.strip("-")
-        return slug

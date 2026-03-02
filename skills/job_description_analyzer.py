@@ -3,19 +3,10 @@
 import json
 from dataclasses import dataclass
 
-from .base_skill import BaseSkill, SkillContext, SkillResult, _load_reference
+from .base_skill import BaseSkill, SkillContext, SkillResult, _load_reference, _load_role_archetypes, _load_role_lens_guidance
 
-# Constrained set of role archetypes. Used in analysis prompt and validated after.
-ROLE_ARCHETYPES = {
-    "org_leadership": "VP/Director/Head of Eng — org-wide strategy, budget, culture",
-    "team_leadership": "Engineering Manager — team building, delivery, people management",
-    "tech_lead": "Staff/Principal/Architect — technical direction, system design, IC with influence",
-    "product": "Product Manager/TPM — roadmap, stakeholder alignment, product outcomes",
-    "data": "Data/Analytics Engineering — pipelines, warehouses, BI, data platforms",
-    "ml": "ML/AI Engineering — model development, MLOps, applied AI systems",
-    "infra": "Platform/Infra/SRE — cloud, DevOps, reliability, infrastructure",
-    "ic": "Individual Contributor — hands-on software engineering, feature delivery",
-}
+# Loaded from openclaw/shared/references/role-archetypes.md
+ROLE_ARCHETYPES = _load_role_archetypes()
 
 JOB_ANALYSIS_PROMPT = _load_reference("analysis-prompt.md")
 
@@ -163,48 +154,5 @@ Provide a detailed match analysis and recommendations.""",
         Returns:
             Guidance text for the specified role lens and document type.
         """
-        guidance = {
-            "engineering": {
-                "resume": """This is an ENGINEERING role. Emphasize:
-- Technical systems architecture and ownership
-- Code, infrastructure, and platform decisions
-- Scaling engineering teams and establishing technical practices
-- Production reliability, observability, and operational excellence
-- AI/ML systems from experimentation to production deployment
-- Technical mentorship and growing engineers""",
-                "cover_letter": """This is an ENGINEERING role. Frame experience around:
-- Systems you built or architected and their technical constraints
-- Engineering team leadership and scaling
-- Production operations and reliability outcomes
-- Technical decision-making and trade-offs"""
-            },
-            "product": {
-                "resume": """This is a PRODUCT role. Emphasize:
-- Product strategy, vision, and roadmap ownership
-- Customer outcomes and business metrics
-- Cross-functional leadership with engineering, design, sales
-- Data-driven decision making and experimentation
-- Market analysis and competitive positioning
-- Prioritization frameworks and trade-off decisions""",
-                "cover_letter": """This is a PRODUCT role. Frame experience around:
-- Products you shaped and the customer/business outcomes
-- Strategic decisions about what to build and why
-- Working with engineering teams to deliver product value
-- Metrics, experimentation, and iteration"""
-            },
-            "program": {
-                "resume": """This is a PROGRAM role. Emphasize:
-- Cross-functional coordination and delivery execution
-- Stakeholder management across engineering, product, leadership
-- Process design, risk management, and dependency tracking
-- Program-level metrics, reporting, and visibility
-- Driving alignment and unblocking teams
-- Launch coordination and operational readiness""",
-                "cover_letter": """This is a PROGRAM role. Frame experience around:
-- Complex programs you drove to completion
-- Cross-functional coordination and stakeholder alignment
-- Process improvements and delivery outcomes
-- Risk identification and mitigation"""
-            }
-        }
-        return guidance.get(role_lens, guidance["engineering"]).get(doc_type, "")
+        guidance = _load_role_lens_guidance()
+        return guidance.get(role_lens, guidance.get("engineering", {})).get(doc_type, "")

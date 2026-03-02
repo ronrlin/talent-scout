@@ -257,3 +257,57 @@ def _is_same_metro_area(job_location: str, city: str, state: str) -> bool:
                 return True
 
     return False
+
+
+def build_target_roles_text(config: dict) -> str:
+    """Build target roles as bulleted text from config, for prompt injection.
+
+    Args:
+        config: Application configuration dictionary.
+
+    Returns:
+        Bulleted list of target roles.
+    """
+    target_roles = config.get("preferences", {}).get(
+        "target_roles",
+        [
+            "Engineering Manager",
+            "Software Manager",
+            "Technical Product Manager",
+            "Director of Analytics Engineering",
+        ],
+    )
+    return "\n".join(f"- {role}" for role in target_roles)
+
+
+def build_location_type_rules(config: dict) -> str:
+    """Build location type rules from config, for prompt injection.
+
+    Args:
+        config: Application configuration dictionary.
+
+    Returns:
+        Formatted location rules text.
+    """
+    rules = []
+    locations = get_locations(config)
+
+    for location in locations:
+        slug = get_location_slug(location)
+        desc = get_location_description(location)
+        rules.append(f'- "{slug}" = {desc}')
+
+    if is_remote_enabled(config):
+        rules.append(
+            '- "remote" = Remote, distributed, work from anywhere, or hybrid with remote option'
+        )
+        rules.append(
+            '\nIf the location doesn\'t clearly match any configured location, default to "remote".'
+        )
+    elif locations:
+        default_slug = get_location_slug(locations[0])
+        rules.append(
+            f'\nIf the location doesn\'t clearly match any configured location, default to "{default_slug}".'
+        )
+
+    return "\n".join(rules)

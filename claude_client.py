@@ -1,15 +1,15 @@
 """Claude API client wrapper with retry logic and JSON parsing."""
 
 import json
+import logging
 import time
 from typing import Any
 
 from anthropic import Anthropic, APIError, RateLimitError, APIConnectionError
-from rich.console import Console
 
 from config_loader import get_anthropic_api_key
 
-console = Console()
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
@@ -72,14 +72,14 @@ class ClaudeClient:
             except RateLimitError as e:
                 last_error = e
                 if attempt < retry_count - 1:
-                    console.print(f"[yellow]Rate limited, waiting {delay}s...[/yellow]")
+                    logger.warning("Rate limited, waiting %ss...", delay)
                     time.sleep(delay)
                     delay *= 2  # Exponential backoff
 
             except APIConnectionError as e:
                 last_error = e
                 if attempt < retry_count - 1:
-                    console.print(f"[yellow]Connection error, retrying in {delay}s...[/yellow]")
+                    logger.warning("Connection error, retrying in %ss...", delay)
                     time.sleep(delay)
                     delay *= 2
 
@@ -89,7 +89,7 @@ class ClaudeClient:
                     raise
                 last_error = e
                 if attempt < retry_count - 1:
-                    console.print(f"[yellow]API error, retrying in {delay}s...[/yellow]")
+                    logger.warning("API error, retrying in %ss...", delay)
                     time.sleep(delay)
                     delay *= 2
 
