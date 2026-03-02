@@ -777,15 +777,6 @@ def next_actions(ctx):
 
 
 @cli.command()
-@click.argument("company_name")
-@click.pass_context
-def connections(ctx, company_name: str):
-    """Find connections at a specific company."""
-    console.print(f"[yellow]Connection finder not yet implemented[/yellow]")
-    console.print(f"Would find connections at: {company_name}")
-
-
-@cli.command()
 @click.argument("job_id")
 @click.pass_context
 def analyze(ctx, job_id: str):
@@ -1048,16 +1039,6 @@ def interview_prep(ctx, job_id: str):
         console.print(f"\n[green]Interview prep saved to:[/green] {result.markdown_path}")
     except (JobNotFoundError, ResumeNotFoundError, GenerationFailedError) as e:
         console.print(f"[red]{e}[/red]")
-
-
-@cli.command()
-@click.argument("company_name")
-@click.option("--connection", help="Specific connection to reach out to.")
-@click.pass_context
-def outreach(ctx, company_name: str, connection: str | None):
-    """Generate cold outreach email for a company."""
-    console.print(f"[yellow]Outreach generator not yet implemented[/yellow]")
-    console.print(f"Would generate outreach for: {company_name}")
 
 
 # ============================================================================

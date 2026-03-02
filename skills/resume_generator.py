@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 
 from .base_skill import BaseSkill, SkillContext, SkillResult, _load_reference, _load_role_lens_guidance
+from . import resume_editor
 
 RESUME_GENERATION_PROMPT = _load_reference("resume-generation-prompt.md")
 RESUME_DEFENSIBILITY_PROMPT = _load_reference("resume-defensibility-prompt.md")
@@ -202,13 +203,12 @@ Propose 3-8 high-impact edits. Remember: most of the resume should remain unchan
             proposed_text = edit.get("proposed_text", "")
 
             if edit_type == "replace":
-                result = self._apply_replacement(resume, current_text, proposed_text)
+                result = resume_editor.apply_replacement(resume, current_text, proposed_text)
                 if result is not None:
                     resume = result
                     report.append({"target": target, "edit_type": "replace", "applied": True})
                 else:
-                    # Try fuzzy match with normalized whitespace
-                    result = self._apply_fuzzy_replacement(resume, current_text, proposed_text)
+                    result = resume_editor.apply_fuzzy_replacement(resume, current_text, proposed_text)
                     if result is not None:
                         resume = result
                         report.append({"target": target, "edit_type": "replace", "applied": True, "method": "fuzzy"})
@@ -221,7 +221,7 @@ Propose 3-8 high-impact edits. Remember: most of the resume should remain unchan
                         })
 
             elif edit_type == "add":
-                result = self._apply_addition(resume, edit)
+                result = resume_editor.apply_addition(resume, edit)
                 if result is not None:
                     resume = result
                     report.append({"target": target, "edit_type": "add", "applied": True})
@@ -234,7 +234,7 @@ Propose 3-8 high-impact edits. Remember: most of the resume should remain unchan
                     })
 
             elif edit_type == "remove":
-                result = self._apply_removal(resume, current_text)
+                result = resume_editor.apply_removal(resume, current_text)
                 if result is not None:
                     resume = result
                     report.append({"target": target, "edit_type": "remove", "applied": True})
@@ -253,7 +253,9 @@ Propose 3-8 high-impact edits. Remember: most of the resume should remain unchan
         ]
 
         if failed_edits:
-            fallback_result = self._apply_edits_via_claude(resume, failed_edits)
+            fallback_result = resume_editor.apply_edits_via_claude(
+                self.client, resume, failed_edits
+            )
             if fallback_result:
                 resume = fallback_result
                 for i, _ in failed_edits:
@@ -372,7 +374,7 @@ Review ONLY the changed lines. Do not touch anything else.""",
                 target = audit_item.get("target", "")
                 for edit in edits:
                     if edit.get("target") == target and edit.get("proposed_text"):
-                        replacement = self._apply_replacement(
+                        replacement = resume_editor.apply_replacement(
                             resume, edit["proposed_text"], revised
                         )
                         if replacement is not None:
@@ -384,7 +386,7 @@ Review ONLY the changed lines. Do not touch anything else.""",
                 for edit in edits:
                     if edit.get("target") == target:
                         if edit.get("edit_type") == "replace" and edit.get("current_text"):
-                            revert = self._apply_replacement(
+                            revert = resume_editor.apply_replacement(
                                 resume, edit["proposed_text"], edit["current_text"]
                             )
                             if revert is not None:
@@ -392,209 +394,6 @@ Review ONLY the changed lines. Do not touch anything else.""",
                         break
 
         return SkillResult.ok({"resume": resume, "report": audit_summary})
-
-    # =========================================================================
-    # Edit Application Helpers
-    # =========================================================================
-
-    def _apply_replacement(
-        self, resume: str, current_text: str, proposed_text: str
-    ) -> str | None:
-        """Apply an exact string replacement. Returns None if not found."""
-        if not current_text or current_text not in resume:
-            return None
-        return resume.replace(current_text, proposed_text, 1)
-
-    def _apply_fuzzy_replacement(
-        self, resume: str, current_text: str, proposed_text: str
-    ) -> str | None:
-        """Apply replacement with normalized whitespace matching."""
-        if not current_text:
-            return None
-
-        # Normalize whitespace for matching
-        def normalize(text: str) -> str:
-            return " ".join(text.split())
-
-        normalized_current = normalize(current_text)
-        lines = resume.split("\n")
-        rebuilt = []
-        found = False
-
-        # Try to match against individual lines or consecutive line groups
-        i = 0
-        while i < len(lines):
-            if not found:
-                # Try single line match
-                if normalize(lines[i]) == normalized_current:
-                    # Preserve leading whitespace from original line
-                    leading = lines[i][: len(lines[i]) - len(lines[i].lstrip())]
-                    rebuilt.append(leading + proposed_text.strip())
-                    found = True
-                    i += 1
-                    continue
-
-                # Try matching the line content (stripping markdown bullet prefix)
-                line_content = lines[i].lstrip()
-                if line_content.startswith("- "):
-                    line_content = line_content[2:]
-                current_content = current_text.lstrip()
-                if current_content.startswith("- "):
-                    current_content = current_content[2:]
-
-                if normalize(line_content) == normalize(current_content):
-                    leading = lines[i][: len(lines[i]) - len(lines[i].lstrip())]
-                    # Preserve bullet prefix if present
-                    if lines[i].lstrip().startswith("- "):
-                        prefix = leading + "- "
-                        new_text = proposed_text.strip()
-                        if new_text.startswith("- "):
-                            new_text = new_text[2:]
-                        rebuilt.append(prefix + new_text)
-                    else:
-                        rebuilt.append(leading + proposed_text.strip())
-                    found = True
-                    i += 1
-                    continue
-
-            rebuilt.append(lines[i])
-            i += 1
-
-        if found:
-            return "\n".join(rebuilt)
-        return None
-
-    def _apply_addition(self, resume: str, edit: dict) -> str | None:
-        """Insert a new bullet after the specified target location."""
-        target = edit.get("target", "")
-        proposed_text = edit.get("proposed_text", "")
-
-        if not proposed_text:
-            return None
-
-        # Parse target like "Tesla, after bullet 3" or "Company Name, after bullet N"
-        match = re.search(r"after bullet (\d+)", target, re.IGNORECASE)
-        company_match = re.match(r"^(.+?),\s*after", target, re.IGNORECASE)
-
-        if not match:
-            return None
-
-        bullet_num = int(match.group(1))
-        company_hint = company_match.group(1).strip() if company_match else ""
-
-        lines = resume.split("\n")
-        result_lines = []
-        in_target_section = False
-        bullet_count = 0
-        inserted = False
-
-        for i, line in enumerate(lines):
-            result_lines.append(line)
-
-            # Detect section by company name in heading
-            if company_hint and company_hint.lower() in line.lower() and (
-                line.startswith("#") or line.startswith("**")
-            ):
-                in_target_section = True
-                bullet_count = 0
-                continue
-
-            # Detect leaving a section (next heading)
-            if in_target_section and not inserted and (
-                line.startswith("### ") or line.startswith("## ")
-            ) and bullet_count > 0:
-                in_target_section = False
-
-            # Count bullets in target section
-            if in_target_section and line.lstrip().startswith("- "):
-                bullet_count += 1
-                if bullet_count == bullet_num and not inserted:
-                    # Insert after this bullet
-                    new_bullet = proposed_text.strip()
-                    if not new_bullet.startswith("- "):
-                        new_bullet = "- " + new_bullet
-                    result_lines.append(new_bullet)
-                    inserted = True
-
-        if inserted:
-            return "\n".join(result_lines)
-        return None
-
-    def _apply_removal(self, resume: str, current_text: str) -> str | None:
-        """Remove a bullet from the resume."""
-        if not current_text:
-            return None
-
-        # Try exact match first
-        if current_text in resume:
-            # Remove the line and any trailing newline
-            result = resume.replace(current_text, "", 1)
-            # Clean up double blank lines
-            result = re.sub(r"\n{3,}", "\n\n", result)
-            return result
-
-        # Try fuzzy match
-        def normalize(text: str) -> str:
-            return " ".join(text.split())
-
-        normalized_target = normalize(current_text)
-        lines = resume.split("\n")
-        result_lines = []
-        found = False
-
-        for line in lines:
-            if not found and normalize(line) == normalized_target:
-                found = True
-                continue  # Skip this line (remove it)
-            result_lines.append(line)
-
-        if found:
-            return "\n".join(result_lines)
-        return None
-
-    def _apply_edits_via_claude(
-        self, resume: str, failed_edits: list[tuple[int, dict]]
-    ) -> str | None:
-        """Fallback: use Claude to apply edits that string matching couldn't handle."""
-        if not failed_edits:
-            return None
-
-        edit_instructions = []
-        for i, edit in failed_edits:
-            edit_type = edit.get("edit_type", "replace")
-            target = edit.get("target", "")
-            current_text = edit.get("current_text", "")
-            proposed_text = edit.get("proposed_text", "")
-
-            if edit_type == "replace":
-                edit_instructions.append(
-                    f"EDIT {i+1} [{edit_type.upper()}]: In {target}, "
-                    f"find text similar to: \"{current_text}\" "
-                    f"and replace it with: \"{proposed_text}\""
-                )
-            elif edit_type == "add":
-                edit_instructions.append(
-                    f"EDIT {i+1} [ADD]: In {target}, "
-                    f"add this bullet: \"{proposed_text}\""
-                )
-            elif edit_type == "remove":
-                edit_instructions.append(
-                    f"EDIT {i+1} [REMOVE]: In {target}, "
-                    f"remove the bullet: \"{current_text}\""
-                )
-
-        response = self.client.complete(
-            system="""Apply the specified edits to the resume. Change ONLY what is described in the edits. Do not modify any other part of the resume. Preserve all formatting, structure, and whitespace exactly. Output ONLY the modified resume in Markdown.""",
-            user=f"""Apply these specific edits to the resume:
-
-{chr(10).join(edit_instructions)}
-
-RESUME:
-{resume}""",
-            max_tokens=4096,
-        )
-
-        return response if response else None
 
     def _generate_resume_content(
         self,
