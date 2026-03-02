@@ -147,6 +147,19 @@ class PipelineStore:
         self._save(data)
         return True
 
+    def remove(self, job_id: str) -> bool:
+        """Remove a pipeline entry entirely (e.g. when a job is deleted).
+
+        Returns False if job not in pipeline.
+        """
+        data = self._load()
+        if job_id not in data["applications"]:
+            return False
+
+        del data["applications"][job_id]
+        self._save(data)
+        return True
+
     def close(self, job_id: str, outcome: str, trigger: str) -> bool:
         """Set status=closed with an outcome."""
         if outcome not in CLOSED_OUTCOMES:

@@ -152,6 +152,9 @@ class JobService(BaseService):
         if not job:
             raise JobNotFoundError(job_id)
 
+        # Remove from pipeline so it doesn't show as "? at ?"
+        self.pipeline.remove(job_id)
+
         # Record for negative learning
         self.data_store.record_deleted_job(job, reason)
 
@@ -386,7 +389,9 @@ class JobService(BaseService):
                 continue
 
             job_id = entry["job_id"]
-            job = job_lookup.get(job_id, {})
+            job = job_lookup.get(job_id)
+            if not job:
+                continue  # Skip orphaned pipeline entries (job was deleted)
 
             by_stage[s].append(
                 JobSummary(
@@ -410,7 +415,7 @@ class JobService(BaseService):
 
         return PipelineOverview(
             stages=by_stage,
-            total=len(all_entries),
+            total=sum(len(jobs) for jobs in by_stage.values()),
             summary=summary,
         )
 
