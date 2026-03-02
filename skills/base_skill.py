@@ -1,10 +1,18 @@
 """Base skill class and common data structures for stateless skills."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from claude_client import ClaudeClient
 from data_store import DataStore
+
+_REFERENCES_DIR = Path(__file__).resolve().parent.parent / "openclaw" / "shared" / "references"
+
+
+def _load_reference(filename: str) -> str:
+    """Load a prompt/reference file from shared references directory."""
+    return (_REFERENCES_DIR / filename).read_text().strip()
 
 
 @dataclass
