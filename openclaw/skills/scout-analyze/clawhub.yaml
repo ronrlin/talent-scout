@@ -1,0 +1,16 @@
+name: talent-scout/scout-analyze
+version: 0.1.0
+description: Analyze a job and assess match — match score, gap analysis, and resume recommendations.
+author: Ron Lin
+license: MIT
+skill: SKILL.md
+
+requires:
+  bins: [scout-tools]
+
+install:
+  - id: scripts
+    kind: uv
+    package: talent-scout-scripts
+    bins: [scout-tools]
+    label: Install Talent Scout tools

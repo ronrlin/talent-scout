@@ -1,0 +1,16 @@
+name: talent-scout/scout-pipeline
+version: 0.1.0
+description: Manage job application pipeline — status, actions, tracking, and learning.
+author: Ron Lin
+license: MIT
+skill: SKILL.md
+
+requires:
+  bins: [scout-tools]
+
+install:
+  - id: scripts
+    kind: uv
+    package: talent-scout-scripts
+    bins: [scout-tools]
+    label: Install Talent Scout tools

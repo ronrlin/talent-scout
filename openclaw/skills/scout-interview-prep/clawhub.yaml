@@ -1,0 +1,16 @@
+name: talent-scout/scout-interview-prep
+version: 0.1.0
+description: Generate interview prep talking points for an upcoming interview.
+author: Ron Lin
+license: MIT
+skill: SKILL.md
+
+requires:
+  bins: [scout-tools]
+
+install:
+  - id: scripts
+    kind: uv
+    package: talent-scout-scripts
+    bins: [scout-tools]
+    label: Install Talent Scout tools

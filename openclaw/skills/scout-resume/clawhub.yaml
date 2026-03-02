@@ -1,0 +1,24 @@
+name: talent-scout/scout-resume
+version: 0.1.0
+description: Generate or improve a customized resume tailored to a specific job posting.
+author: Ron Lin
+license: MIT
+skill: SKILL.md
+
+os: [darwin, linux]
+
+requires:
+  bins: [scout-tools]
+  anyBins: [weasyprint]
+
+install:
+  - id: scripts
+    kind: uv
+    package: talent-scout-scripts
+    bins: [scout-tools]
+    label: Install Talent Scout tools
+  - id: weasyprint
+    kind: brew
+    formula: weasyprint
+    bins: [weasyprint]
+    label: Install WeasyPrint for PDF generation

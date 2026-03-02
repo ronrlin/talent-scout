@@ -1,0 +1,16 @@
+name: talent-scout/scout-research
+version: 0.1.0
+description: Research a company or import a job from URL or pasted text.
+author: Ron Lin
+license: MIT
+skill: SKILL.md
+
+requires:
+  bins: [scout-tools]
+
+install:
+  - id: scripts
+    kind: uv
+    package: talent-scout-scripts
+    bins: [scout-tools]
+    label: Install Talent Scout tools

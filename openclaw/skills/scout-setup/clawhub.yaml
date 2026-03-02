@@ -1,0 +1,16 @@
+name: talent-scout/scout-setup
+version: 0.1.0
+description: Set up Talent Scout — configure job search, parse resume into profile, initialize workspace.
+author: Ron Lin
+license: MIT
+skill: SKILL.md
+
+requires:
+  bins: [scout-tools]
+
+install:
+  - id: scripts
+    kind: uv
+    package: talent-scout-scripts
+    bins: [scout-tools]
+    label: Install Talent Scout tools

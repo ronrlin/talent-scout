@@ -1,0 +1,32 @@
+name: talent-scout
+version: 0.1.0
+description: AI-powered job search automation — scout companies, research jobs, generate tailored resumes, and track your pipeline.
+author: Ron Lin
+license: MIT
+type: meta
+
+skills:
+  - talent-scout/scout-setup
+  - talent-scout/scout-companies
+  - talent-scout/scout-research
+  - talent-scout/scout-analyze
+  - talent-scout/scout-resume
+  - talent-scout/scout-cover-letter
+  - talent-scout/scout-interview-prep
+  - talent-scout/scout-pipeline
+
+requires:
+  bins: [scout-tools]
+  anyBins: [weasyprint]
+
+install:
+  - id: scripts
+    kind: uv
+    package: talent-scout-scripts
+    bins: [scout-tools]
+    label: Install Talent Scout tools
+  - id: weasyprint
+    kind: brew
+    formula: weasyprint
+    bins: [weasyprint]
+    label: Install WeasyPrint for PDF generation (optional)
