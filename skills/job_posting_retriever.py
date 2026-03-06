@@ -1,12 +1,20 @@
 """Job Posting Retriever Skill - fetches and parses job postings from URLs or markdown."""
 
 import logging
+import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+
+try:
+    from firecrawl import Firecrawl as FirecrawlClient
+    _FIRECRAWL_AVAILABLE = True
+except ImportError:
+    _FIRECRAWL_AVAILABLE = False
 
 # Configure error logger to write to error.log in project root
 _error_logger = logging.getLogger("talent_scout.job_retriever")
@@ -18,6 +26,68 @@ if not _error_logger.handlers:
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     )
     _error_logger.addHandler(_file_handler)
+
+# JS shell / bot-protection challenge signatures (case-insensitive substrings)
+_CHALLENGE_SIGNATURES = [
+    "just a moment",
+    "checking your browser",
+    "access denied",
+    "cf-browser-verification",
+    "pardon our interruption",
+    "please enable javascript",
+    "enable cookies",
+    "ray id",
+]
+
+
+def _strip_html_to_text(html: str) -> str:
+    """Strip scripts, styles, comments, and HTML tags to extract visible text."""
+    text = re.sub(r"<script[\s\S]*?</script>", "", html, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\s\S]*?</style>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<!--[\s\S]*?-->", "", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _is_js_shell(html: str) -> bool:
+    """Detect if HTML is a JS shell, bot challenge, or otherwise unusable.
+
+    Returns True when content should be escalated to Firecrawl.
+    """
+    if not html:
+        _error_logger.debug("JS shell detection: empty content")
+        return True
+
+    html_lower = html.lower()
+
+    # Check for challenge/bot-protection signatures in raw HTML
+    for sig in _CHALLENGE_SIGNATURES:
+        if sig in html_lower:
+            _error_logger.debug("JS shell detection: challenge signature '%s'", sig)
+            return True
+
+    visible = _strip_html_to_text(html)
+
+    # Visible text too short to be a real job posting
+    if len(visible) < 200:
+        _error_logger.debug(
+            "JS shell detection: visible text too short (%d chars)", len(visible)
+        )
+        return True
+
+    # Text-to-HTML ratio too low (SPA shell with huge JS bundles)
+    if len(html) > 5000 and len(visible) / len(html) < 0.02:
+        _error_logger.debug(
+            "JS shell detection: low text ratio (%.4f, html=%d, text=%d)",
+            len(visible) / len(html),
+            len(html),
+            len(visible),
+        )
+        return True
+
+    return False
+
 
 from config_loader import (
     get_location_slug,
@@ -138,7 +208,15 @@ class JobPostingRetrieverSkill(BaseSkill):
         return SkillResult.ok(result)
 
     def _fetch_url_content(self, url: str) -> str | None:
-        """Fetch content from a URL."""
+        """Fetch content from a URL with Firecrawl fallback.
+
+        Tier 1: httpx GET — fast, works for server-rendered pages.
+        Tier 2: Firecrawl /scrape — handles JS SPAs and bot-protected sites.
+        """
+        httpx_html = None
+        escalation_reason = None
+
+        # Tier 1: httpx
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -146,20 +224,105 @@ class JobPostingRetrieverSkill(BaseSkill):
             with httpx.Client(timeout=30, follow_redirects=True, headers=headers) as client:
                 response = client.get(url)
                 if response.status_code == 200:
-                    return response.text
-                _error_logger.error(
-                    "HTTP %d fetching %s — response: %s",
-                    response.status_code,
-                    url,
-                    response.text[:500],
-                )
+                    if not _is_js_shell(response.text):
+                        return response.text
+                    httpx_html = response.text
+                    escalation_reason = "JS shell detected"
+                else:
+                    _error_logger.error(
+                        "HTTP %d fetching %s — response: %s",
+                        response.status_code,
+                        url,
+                        response.text[:500],
+                    )
+                    escalation_reason = f"HTTP {response.status_code}"
         except httpx.TimeoutException as e:
             _error_logger.error("Timeout fetching %s: %s", url, e)
+            escalation_reason = "timeout"
         except httpx.ConnectError as e:
             _error_logger.error("Connection error fetching %s: %s", url, e)
+            escalation_reason = "connection error"
         except Exception as e:
-            _error_logger.error("Unexpected error fetching %s: %s: %s", url, type(e).__name__, e)
+            _error_logger.error(
+                "Unexpected error fetching %s: %s: %s", url, type(e).__name__, e
+            )
+            escalation_reason = f"{type(e).__name__}"
+
+        # Tier 2: Firecrawl fallback
+        _error_logger.info(
+            "Escalating to Firecrawl for %s (reason: %s)", url, escalation_reason
+        )
+        firecrawl_md = self._fetch_with_firecrawl(url)
+        if firecrawl_md:
+            return firecrawl_md
+
+        # Last resort: return httpx HTML if we got any (even a JS shell)
+        if httpx_html:
+            _error_logger.info(
+                "Returning httpx HTML as last resort for %s (%d chars)",
+                url,
+                len(httpx_html),
+            )
+            return httpx_html
+
         return None
+
+    def _fetch_with_firecrawl(self, url: str) -> str | None:
+        """Fetch content via Firecrawl scrape API. Returns markdown or None."""
+        if not _FIRECRAWL_AVAILABLE:
+            _error_logger.info(
+                "Firecrawl not available (firecrawl-py not installed). "
+                "Install with: pip install talent-scout[firecrawl]"
+            )
+            return None
+
+        api_key = os.environ.get("FIRECRAWL_API_KEY")
+        if not api_key:
+            _error_logger.info(
+                "Firecrawl API key not set. "
+                "Set FIRECRAWL_API_KEY env var to enable fallback scraping."
+            )
+            return None
+
+        try:
+            client = FirecrawlClient(api_key=api_key)
+            result = client.scrape(url, formats=["markdown"])
+            markdown = result.markdown if result else None
+
+            if not markdown or len(markdown) < 100:
+                _error_logger.warning(
+                    "Firecrawl returned insufficient content for %s (length=%d)",
+                    url,
+                    len(markdown) if markdown else 0,
+                )
+                return None
+
+            _error_logger.info(
+                "Firecrawl successfully scraped %s (%d chars markdown)",
+                url,
+                len(markdown),
+            )
+            return markdown
+
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+            error_lower = f"{error_type} {error_msg}".lower()
+
+            if "429" in error_msg or "rate" in error_lower:
+                _error_logger.warning(
+                    "Firecrawl rate limited for %s: %s", url, e
+                )
+            elif "401" in error_msg or "403" in error_msg or "auth" in error_lower:
+                _error_logger.warning(
+                    "Firecrawl authentication failed for %s. Check FIRECRAWL_API_KEY.",
+                    url,
+                )
+            else:
+                _error_logger.warning(
+                    "Firecrawl error for %s: %s: %s", url, error_type, e
+                )
+            return None
 
     def _parse_job_posting(
         self, source: str, content: str, context: SkillContext
